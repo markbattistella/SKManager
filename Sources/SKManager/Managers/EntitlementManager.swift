@@ -31,6 +31,8 @@ public final class EntitlementManager<
     private var expiryTask: Task<Void, Never>?
     private let config: Capabilities
 
+    public var defaultTier: Group?
+
     public var purchasedProductIDs: Set<String>
     public var activeSubscription: SubscriptionEntitlement<Group>?
     public var lifetimeEntitlements: [LifetimeEntitlement<Group>]
@@ -43,8 +45,9 @@ public final class EntitlementManager<
     /// Creates a new entitlement manager configured with the provided tier capabilities.
     ///
     /// - Parameter config: The app’s tier capability configuration.
-    public init(config: Capabilities) {
+    public init(config: Capabilities, defaultTier: Group? = nil) {
         self.expiryTask = nil
+        self.defaultTier = defaultTier
         self.config = config
         self.purchasedProductIDs = []
         self.activeSubscription = nil
@@ -260,7 +263,8 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
 
     /// Checks whether the current user has access to the specified feature.
     public func hasAccess(to feature: Capabilities.Feature) -> Bool {
-        guard let tier = activeTier,
+        let tier = activeTier ?? defaultTier
+        guard let tier,
               let capability = config.capability(for: feature, in: tier) else {
             return false
         }
@@ -271,7 +275,8 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
     ///
     /// For example, the number of months of data visible under a `.limit(Int)` rule.
     public func limit(for feature: Capabilities.Feature) -> Int? {
-        guard let tier = activeTier,
+        let tier = activeTier ?? defaultTier
+        guard let tier,
               case .limit(let value)? = config.capability(for: feature, in: tier) else {
             return nil
         }
@@ -282,7 +287,8 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
     ///
     /// For `.until(Date)` rules, this indicates when access ends.
     public func expiry(for feature: Capabilities.Feature) -> Date? {
-        guard let tier = activeTier,
+        let tier = activeTier ?? defaultTier
+        guard let tier,
               case .until(let date)? = config.capability(for: feature, in: tier) else {
             return nil
         }
