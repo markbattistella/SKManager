@@ -30,9 +30,11 @@ public final class EntitlementManager<
     private let logger = SimpleLogger(category: .storeKit)
 
     /// The asynchronous task that listens for StoreKit transaction updates.
+    @ObservationIgnored
     private var updatesTask: Task<Void, Never>?
 
     /// The scheduled task that refreshes entitlements when a subscription expires.
+    @ObservationIgnored
     private var expiryTask: Task<Void, Never>?
 
     /// The configuration describing the app’s capability rules and tier mappings.
@@ -79,7 +81,7 @@ public final class EntitlementManager<
     }
 
     /// Cancels all running background tasks before the manager is deallocated.
-    isolated deinit {
+    deinit {
         updatesTask?.cancel()
         expiryTask?.cancel()
     }
