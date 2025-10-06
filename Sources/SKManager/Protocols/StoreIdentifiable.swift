@@ -13,7 +13,7 @@ import Foundation
 ///
 /// By default, the `id` property returns the case’s `rawValue`, making it suitable for use in
 /// SwiftUI lists and collections.
-public protocol StoreIdentifiable: Identifiable, CaseIterable, Hashable, RawRepresentable
+public protocol StoreIdentifiable: Identifiable, CaseIterable, Hashable, Sendable, RawRepresentable
 where RawValue == String {}
 
 public extension StoreIdentifiable {
