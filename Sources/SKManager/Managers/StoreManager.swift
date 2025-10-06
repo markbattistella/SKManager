@@ -1,0 +1,357 @@
+//
+// Project: StoreManager
+// Author: Mark Battistella
+// Website: https://markbattistella.com
+//
+
+import StoreKit
+import Foundation
+import SimpleLogger
+
+/// A manager that handles App Store product fetching, purchasing, restoration, and state
+/// synchronisation.
+///
+/// `StoreManager` coordinates between `StoreKit`, an `EntitlementProvider`, and optional
+/// configuration or visibility rules to present the correct set of purchasable products and to
+/// track purchase status changes.
+///
+/// - Note: Runs on the main actor and is observable for SwiftUI integration.
+@MainActor
+@Observable
+public final class StoreManager<
+    Item: StoreProductRepresentable,
+    Group: ProductTierRepresentable,
+    E: EntitlementProvider
+> where Item.Tier == Group, E.Item == Item, E.Group == Group {
+
+    // MARK: - Typealiases and Nested Types
+
+    private typealias ProductBucket = Bucket<Group, Product>
+
+    /// Represents a grouped collection of products belonging to the same tier.
+    private struct Bucket<Key, Value> {
+        let key: Key
+        let items: [Value]
+    }
+
+    // MARK: - Stored Properties
+
+    private let logger = SimpleLogger(category: .storeKit)
+    private let entitlementManager: E
+    private let config: StoreConfig<Group, Item>
+    private let rules: StoreRules<Item>?
+
+    private var products: [Product] = []
+    private var buckets: [ProductBucket] = []
+    private var purchaseStates: [String: PurchaseState] = [:]
+    private var fetchState: ProductFetchState = .idle
+
+    /// Controls whether the offer-code redemption sheet can be displayed.
+    public var showOfferCodeRedemption: Bool
+
+    /// Controls whether the system subscription-management sheet can be shown.
+    public var showManageSubscriptionsSheet: Bool
+
+    /// Indicates whether the manager is currently fetching product information.
+    public var isFetching: Bool { fetchState == .fetching }
+
+    // MARK: - Initialization
+
+    /// Creates a store manager configured with an entitlement provider and optional rules.
+    ///
+    /// - Parameters:
+    ///   - entitlementManager: The provider that exposes and refreshes entitlements.
+    ///   - config: Optional store configuration describing upgrade and conflict logic.
+    ///   - rules: Optional visibility rules for controlling which products appear.
+    public init(
+        entitlementManager: E,
+        config: StoreConfig<Group, Item> = .defaultConfig,
+        rules: StoreRules<Item>? = nil
+    ) {
+        self.entitlementManager = entitlementManager
+        self.config = config
+        self.rules = rules
+
+        self.showOfferCodeRedemption = false
+        self.showManageSubscriptionsSheet = false
+
+        entitlementManager.onRefresh = { [weak self] in
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                self?.syncPurchaseStates()
+            }
+        }
+    }
+}
+
+// MARK: - Product Fetching
+extension StoreManager {
+
+    /// Refreshes all store data including product listings and entitlement states.
+    public func refreshAll() async {
+        await fetchProducts()
+        await entitlementManager.refreshEntitlements()
+        syncPurchaseStates()
+    }
+
+    /// Fetches product metadata from the App Store for all available product identifiers.
+    private func fetchProducts() async {
+        fetchState = .fetching
+        do {
+            let ids = Item.allCases.map(\.rawValue)
+            let fetched = try await Product.products(for: ids)
+            products = fetched
+            buckets = groupProducts(from: fetched)
+            fetchState = .idle
+        } catch {
+            fetchState = .failed(error)
+        }
+    }
+
+    /// Groups fetched products by their associated tier.
+    ///
+    /// - Parameter products: The list of fetched `Product` objects.
+    /// - Returns: An array of product buckets grouped by tier.
+    private func groupProducts(from products: [Product]) -> [ProductBucket] {
+        Item.groupedByTier.map { (tier, ids) in
+            let matches = products
+                .compactMap { p -> (Item, Product)? in
+                    guard let id = Item(rawValue: p.id) else { return nil }
+                    return ids.contains(id) ? (id, p) : nil
+                }
+                .sorted { $0.0 < $1.0 }
+                .map { $0.1 }
+            return ProductBucket(key: tier, items: matches)
+        }
+    }
+}
+
+// MARK: - Purchasing
+
+extension StoreManager {
+
+    /// Initiates a purchase for the given product.
+    ///
+    /// Handles all StoreKit purchase outcomes and updates entitlement state accordingly.
+    ///
+    /// - Parameter product: The StoreKit product to purchase.
+    public func purchase(_ product: Product) async {
+        purchaseStates[product.id] = .purchasing
+        do {
+            let result = try await product.purchase()
+            switch result {
+                case let .success(.verified(transaction)):
+                    await transaction.finish()
+                    await entitlementManager.refreshEntitlements()
+                    syncPurchaseStates()
+
+                case let .success(.unverified(_, error)):
+                    purchaseStates[product.id] = .failed(error)
+
+                case .pending:
+                    purchaseStates[product.id] = .pending
+
+                case .userCancelled:
+                    purchaseStates[product.id] = .ready(price: product.displayPrice)
+
+                @unknown default:
+                    purchaseStates[product.id] = .ready(price: product.displayPrice)
+            }
+        } catch {
+            purchaseStates[product.id] = .failed(error)
+        }
+    }
+
+    /// Restores all previously purchased products and subscriptions from the App Store.
+    public func restorePurchases() async {
+        try? await AppStore.sync()
+        await refreshAll()
+    }
+}
+
+// MARK: - Product Filtering
+
+extension StoreManager {
+
+    /// Returns the list of visible products for a given tier, applying the visibility rules and
+    /// ownership state.
+    ///
+    /// - Parameter group: The product tier to fetch products for.
+    /// - Returns: The filtered array of `Product` instances visible to the user.
+    public func products(for group: Group) -> [Product] {
+        guard let bucket = buckets.first(where: { $0.key == group }) else { return [] }
+        let owned = entitlementManager.purchasedProductIDs
+        guard let rules else { return bucket.items }
+
+        let hidden = rules.hiddenProducts(for: owned)
+        let visible = rules.visibleProducts(for: owned)
+
+        return bucket.items.filter { product in
+            guard let item = Item(rawValue: product.id) else { return false }
+
+            if owned.isEmpty { return rules.defaultVisible.contains(item) }
+            if visible.contains(item) { return true }
+            if hidden.contains(item) { return false }
+            if !rules.defaultVisible.contains(item) { return false }
+            return true
+        }
+    }
+
+    /// Retrieves a product by its identifier.
+    ///
+    /// - Parameter id: The product identifier.
+    /// - Returns: The matching `Product`, or `nil` if not found.
+    public func product(with id: String) -> Product? {
+        self.products.first { $0.id == id }
+    }
+}
+
+// MARK: - Purchase State Synchronisation
+
+extension StoreManager {
+
+    /// Synchronises the internal purchase state map with the current entitlement state.
+    ///
+    /// Called after entitlement refreshes or purchase updates to keep UI and logic in sync.
+    private func syncPurchaseStates() {
+        for product in products {
+            purchaseStates[product.id] = .ready(price: product.displayPrice)
+        }
+
+        for lifetime in entitlementManager.lifetimeEntitlements {
+            purchaseStates[lifetime.productID] = .active(type: .nonConsumable)
+        }
+
+        guard let sub = entitlementManager.activeSubscription else { return }
+
+        let activeID = sub.productID
+        if let product = products.first(where: { $0.id == activeID }) {
+            if case .cancel(let expiry?) = sub.renewalAction {
+                let remaining = max(0, expiry.timeIntervalSinceNow)
+                if remaining > 0 {
+                    purchaseStates[activeID] = .cancelled(timeRemaining: remaining)
+                } else {
+                    purchaseStates[activeID] = .ready(price: product.displayPrice)
+                }
+            } else {
+                purchaseStates[activeID] = .active(type: .autoRenewable)
+            }
+        }
+
+        switch sub.renewalAction {
+            case .crossgrade(let nextID, let date), .downgrade(_, let nextID, let date):
+                if products.contains(where: { $0.id == nextID }) {
+                    purchaseStates[nextID] = .upcoming(activationDate: date)
+                }
+
+            default: break
+        }
+    }
+}
+
+// MARK: - Helpers
+
+extension StoreManager {
+
+    /// Returns the current purchase state for a product.
+    ///
+    /// - Parameter product: The product to check.
+    /// - Returns: Its corresponding `PurchaseState`.
+    public func purchaseState(for product: Product) -> PurchaseState {
+        purchaseStates[product.id] ?? .ready(price: product.displayPrice)
+    }
+
+    /// Determines whether a product is currently active (purchased or not yet expired).
+    public func isCurrentlyActive(_ product: Product) -> Bool {
+        if case .active = purchaseState(for: product) { return true }
+        if case .cancelled(let remaining) = purchaseState(for: product), remaining > 0 { return true }
+        return false
+    }
+
+    /// Checks whether a product has any purchase-related activity such as active, cancelled, or
+    /// upcoming state.
+    public func hasAnyActivity(_ product: Product) -> Bool {
+        switch purchaseState(for: product) {
+            case .active, .cancelled, .upcoming:
+                return true
+            default:
+                return false
+        }
+    }
+}
+
+// MARK: - Conflict Detection
+
+extension StoreManager {
+
+    /// Indicates whether the user owns conflicting products or tiers.
+    ///
+    /// Evaluates both tier-level and product-level conflicts as defined in `StoreConfig`.
+    public var hasConflictingPlans: Bool {
+        for (tier, conflicts) in config.conflictGroups {
+            let hasTier = entitlementManager.lifetimeEntitlements .contains { $0.tier == tier }
+            || entitlementManager.activeSubscription?.tier == tier
+
+            guard hasTier else { continue }
+
+            for other in conflicts {
+                let hasOther = entitlementManager.lifetimeEntitlements.contains { $0.tier == other }
+                || entitlementManager.activeSubscription?.tier == other
+
+                if hasOther { return true }
+            }
+        }
+
+        for (item, conflicts) in config.conflictProducts {
+            let owned = entitlementManager.purchasedProductIDs
+            guard owned.contains(item.rawValue) else { continue }
+
+            for other in conflicts where owned.contains(other.rawValue) {
+                return true
+            }
+        }
+
+        return false
+    }
+}
+
+// MARK: - Supporting Types
+
+extension StoreManager {
+
+    /// Represents the fetch state of store products.
+    internal enum ProductFetchState: Equatable {
+        case idle, fetching, failed(Error)
+        static func ==(l: Self, r: Self) -> Bool {
+            switch (l, r) {
+                case (.idle, .idle), (.fetching, .fetching), (.failed, .failed): return true
+                default: return false
+            }
+        }
+    }
+
+    /// Represents the current purchase state of a specific product.
+    public enum PurchaseState {
+
+        /// Product is available for purchase.
+        case ready(price: String)
+
+        /// Purchase flow is in progress.
+        case purchasing
+
+        /// Purchase is awaiting user or App Store confirmation.
+        case pending
+
+        /// Purchase failed with an error.
+        case failed(Error)
+
+        /// Product is actively owned (non-consumable or subscription).
+        case active(type: Product.ProductType)
+
+        /// Subscription was cancelled but remains active for the remaining duration.
+        case cancelled(timeRemaining: TimeInterval)
+
+        /// Subscription is scheduled to activate or change in the future.
+        case upcoming(activationDate: Date?)
+    }
+}
