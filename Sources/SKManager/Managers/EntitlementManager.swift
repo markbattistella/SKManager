@@ -16,6 +16,8 @@ import SimpleLogger
 /// as the single source of truth for product ownership and feature availability.
 ///
 /// - Note: Runs on the main actor and is observable for SwiftUI integration.
+@MainActor
+@Observable
 public final class EntitlementManager<
     Item: StoreProductRepresentable,
     Group: ProductTierRepresentable,
