@@ -225,22 +225,9 @@ extension EntitlementManager {
     }
 }
 
-// MARK: - Feature Access
+// MARK: - Tier Access
 
 extension EntitlementManager {
-    /// Determines whether the user currently has access to a given feature.
-    ///
-    /// - Parameter feature: The feature being checked.
-    /// - Returns: `true` if access is granted, otherwise `false`.
-    public func hasAccess(to feature: Capabilities.Feature) -> Bool {
-        guard let tier = activeTier else { return false }
-        return config.allows(feature, for: tier)
-    }
-
-    /// Alias for `hasAccess(to:)` to allow concise access checking syntax.
-    public func check(_ feature: Capabilities.Feature) -> Bool {
-        hasAccess(to: feature)
-    }
 
     /// The currently active tier, accounting for subscriptions and lifetime entitlements.
     private var activeTier: Group? {
@@ -264,5 +251,41 @@ extension EntitlementManager {
             return sub.tier
         }
         return nil
+    }
+}
+
+// MARK: - Capability Access
+
+extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRule {
+
+    /// Checks whether the current user has access to the specified feature.
+    public func hasAccess(to feature: Capabilities.Feature) -> Bool {
+        guard let tier = activeTier,
+              let capability = config.capability(for: feature, in: tier) else {
+            return false
+        }
+        return config.isAccessible(capability)
+    }
+
+    /// Returns the limit value for a feature, if defined.
+    ///
+    /// For example, the number of months of data visible under a `.limit(Int)` rule.
+    public func limit(for feature: Capabilities.Feature) -> Int? {
+        guard let tier = activeTier,
+              case .limit(let value)? = config.capability(for: feature, in: tier) else {
+            return nil
+        }
+        return value
+    }
+
+    /// Returns the expiry date for a feature, if defined.
+    ///
+    /// For `.until(Date)` rules, this indicates when access ends.
+    public func expiry(for feature: Capabilities.Feature) -> Date? {
+        guard let tier = activeTier,
+              case .until(let date)? = config.capability(for: feature, in: tier) else {
+            return nil
+        }
+        return date
     }
 }

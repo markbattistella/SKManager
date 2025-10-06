@@ -6,23 +6,55 @@
 
 import Foundation
 
-/// A protocol that defines the relationship between product tiers and app features.
+/// A protocol defining how features are mapped to access capabilities across product tiers.
 ///
-/// Conforming types specify which features are available at each tier level, allowing feature
-/// gating and entitlement-based access control throughout the app.
-public protocol TierCapabilities {
+/// Conforming types describe which features are available at each tier and how access is
+/// evaluated. Each feature–tier combination is associated with a capability value that determines
+/// availability, limits, or conditions of access.
+///
+/// This protocol is generic and supports both simple and complex entitlement models. A default
+/// implementation of `CapabilityRule` is provided for convenience.
+///
+/// The `EntitlementManager` queries this protocol to determine whether a user can access a feature
+/// based on their current subscription or entitlement tier.
+public protocol TierCapabilities: Sendable {
 
     /// The type representing the product tier hierarchy.
-    associatedtype Tier: ProductTierRepresentable
+    associatedtype Tier: ProductTierRepresentable & Hashable
 
-    /// The type representing app features that can be gated by tier.
-    associatedtype Feature
+    /// The type representing individual features that can be gated by tier.
+    associatedtype Feature: Hashable
 
-    /// Determines whether a given feature is available for a specific tier.
+    /// The type that defines how feature availability is represented. Apps can use `CapabilityRule`
+    /// or define their own custom type.
+    associatedtype CapabilityValue
+
+    /// The complete mapping of feature capabilities across all tiers.
+    var capabilities: [Feature: [Tier: CapabilityValue]] { get }
+
+    /// Returns the capability value for the specified feature–tier pair.
     ///
     /// - Parameters:
-    ///   - feature: The feature being checked.
-    ///   - tier: The product tier to evaluate.
-    /// - Returns: `true` if the feature is accessible at the specified tier, otherwise `false`.
-    func allows(_ feature: Feature, for tier: Tier) -> Bool
+    ///   - feature: The feature whose capability should be retrieved.
+    ///   - tier: The tier to evaluate.
+    /// - Returns: The capability value for the feature and tier, or `nil` if undefined.
+    func capability(for feature: Feature, in tier: Tier) -> CapabilityValue?
+
+    /// Evaluates whether a given capability should be considered active or accessible.
+    ///
+    /// The conforming type defines the rules for accessibility, such as allowing `.allowed(true)`,
+    /// `.limit(> 0)`, or `.until(date > now)`.
+    ///
+    /// - Parameter capability: The capability value to evaluate.
+    /// - Returns: `true` if the capability is currently accessible; otherwise `false`.
+    func isAccessible(_ capability: CapabilityValue) -> Bool
+}
+
+public extension TierCapabilities {
+
+    /// Default lookup implementation that retrieves the capability value for the specified
+    /// feature and tier from the `capabilities` map.
+    func capability(for feature: Feature, in tier: Tier) -> CapabilityValue? {
+        capabilities[feature]?[tier]
+    }
 }
