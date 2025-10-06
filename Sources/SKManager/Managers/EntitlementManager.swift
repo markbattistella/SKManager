@@ -81,9 +81,17 @@ public final class EntitlementManager<
     }
 
     /// Cancels all running background tasks before the manager is deallocated.
-    deinit {
+//    deinit {
+//        updatesTask?.cancel()
+//        expiryTask?.cancel()
+//    }
+
+    public func invalidate() {
         updatesTask?.cancel()
         expiryTask?.cancel()
+        updatesTask = nil
+        expiryTask = nil
+
     }
 }
 
