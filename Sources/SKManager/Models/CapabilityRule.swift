@@ -16,8 +16,8 @@ public enum CapabilityRule: Equatable, Sendable {
     /// Indicates that access is explicitly allowed or denied.
     case allowed(Bool)
 
-    /// Indicates access is allowed with a numeric or quantity limit,
-    /// such as a number of months, entries, or items.
+    /// Indicates access is allowed with a numeric or quantity limit, such as a number of months,
+    /// entries, or items.
     case limit(Int)
 
     /// Indicates that access is temporarily available until the specified date.

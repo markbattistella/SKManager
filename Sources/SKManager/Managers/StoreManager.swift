@@ -8,14 +8,14 @@ import StoreKit
 import Foundation
 import SimpleLogger
 
-/// A manager that handles App Store product fetching, purchasing, restoration, and state
-/// synchronisation.
+/// A high-level manager that coordinates StoreKit product handling and user entitlements.
 ///
-/// `StoreManager` coordinates between `StoreKit`, an `EntitlementProvider`, and optional
-/// configuration or visibility rules to present the correct set of purchasable products and to
-/// track purchase status changes.
+/// `StoreManager` is responsible for fetching available products, managing purchase states,
+/// and responding to entitlement updates. It acts as the bridge between StoreKit and the app’s
+/// entitlement layer, ensuring that product visibility and upgrade logic remain consistent
+/// with the user’s current subscription or lifetime access.
 ///
-/// - Note: Runs on the main actor and is observable for SwiftUI integration.
+/// - Note: This type is observable and runs on the main actor to ensure UI safety.
 @MainActor
 @Observable
 public final class StoreManager<
@@ -26,43 +26,69 @@ public final class StoreManager<
 
     // MARK: - Typealiases and Nested Types
 
+    /// A convenience alias representing a collection of products grouped by tier.
     private typealias ProductBucket = Bucket<Group, Product>
 
-    /// Represents a grouped collection of products belonging to the same tier.
+    /// A container that associates a key with a set of related values.
+    ///
+    /// Used internally to group StoreKit products under their respective tiers.
     private struct Bucket<Key, Value> {
+        /// The grouping key, typically a product tier.
         let key: Key
+        /// The set of products belonging to the same group.
         let items: [Value]
     }
 
     // MARK: - Stored Properties
 
+    /// Logger used for store and transaction-related diagnostics.
     private let logger = SimpleLogger(category: .storeKit)
+
+    /// The entitlement manager that provides current user entitlement information.
     private let entitlementManager: E
+
+    /// The configuration that defines lifetime tiers, upgrade permissions, and conflict logic.
     private let config: StoreConfig<Group, Item>
+
+    /// Optional product-visibility rules controlling which products appear in the storefront.
     private let rules: StoreRules<Item>?
 
+    /// The list of currently available StoreKit products.
     private var products: [Product] = []
+
+    /// The grouped product buckets, organised by tier.
     private var buckets: [ProductBucket] = []
+
+    /// The current purchase state for each product identifier.
     private var purchaseStates: [String: PurchaseState] = [:]
+
+    /// The current product-fetch lifecycle state.
     private var fetchState: ProductFetchState = .idle
 
-    /// Controls whether the offer-code redemption sheet can be displayed.
+    /// Indicates whether the offer-code redemption sheet can be displayed.
     public var showOfferCodeRedemption: Bool
 
-    /// Controls whether the system subscription-management sheet can be shown.
+    /// Indicates whether the system subscription-management sheet can be shown.
     public var showManageSubscriptionsSheet: Bool
 
-    /// Indicates whether the manager is currently fetching product information.
+    /// A Boolean value indicating whether the manager is currently fetching product information.
     public var isFetching: Bool { fetchState == .fetching }
 
     // MARK: - Initialization
 
-    /// Creates a store manager configured with an entitlement provider and optional rules.
+    /// Creates a new store manager configured with an entitlement provider and optional store
+    /// logic.
+    ///
+    /// This initializer links the store manager to an existing entitlement system so that
+    /// entitlements and purchase states remain synchronised. When entitlements refresh, the
+    /// manager automatically delays briefly before syncing its internal purchase state.
     ///
     /// - Parameters:
-    ///   - entitlementManager: The provider that exposes and refreshes entitlements.
-    ///   - config: Optional store configuration describing upgrade and conflict logic.
-    ///   - rules: Optional visibility rules for controlling which products appear.
+    ///   - entitlementManager: The entitlement provider responsible for exposing and refreshing
+    ///   user entitlements.
+    ///   - config: An optional store configuration describing upgrade and conflict rules.
+    ///   - rules: Optional visibility rules that determine which products should appear in the
+    ///   store UI.
     public init(
         entitlementManager: E,
         config: StoreConfig<Group, Item> = .defaultConfig,
@@ -75,9 +101,10 @@ public final class StoreManager<
         self.showOfferCodeRedemption = false
         self.showManageSubscriptionsSheet = false
 
+        // Automatically resyncs purchase state after entitlements refresh.
         entitlementManager.onRefresh = { [weak self] in
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 300_000_000)
+                try? await Task.sleep(nanoseconds: 300_000_000) // debounce refresh
                 self?.syncPurchaseStates()
             }
         }

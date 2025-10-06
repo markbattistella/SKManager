@@ -9,15 +9,13 @@ import Observation
 import StoreKit
 import SimpleLogger
 
-/// A manager responsible for tracking and updating the user’s App Store entitlements, including
-/// subscriptions, lifetime purchases, and consumable products.
+/// A manager responsible for tracking and updating the user’s App Store entitlements.
 ///
-/// The `EntitlementManager` listens to StoreKit transaction updates, validates entitlements, and
-/// determines the user’s current access tier based on active purchases.
+/// `EntitlementManager` observes StoreKit transactions, validates entitlements, and determines
+/// the user’s current access tier based on active subscriptions or lifetime purchases. It serves
+/// as the single source of truth for product ownership and feature availability.
 ///
-/// - Note: This class runs on the main actor and is observable for use in SwiftUI.
-@MainActor
-@Observable
+/// - Note: Runs on the main actor and is observable for SwiftUI integration.
 public final class EntitlementManager<
     Item: StoreProductRepresentable,
     Group: ProductTierRepresentable,
@@ -26,25 +24,47 @@ public final class EntitlementManager<
 
     // MARK: - Properties
 
+    /// Logger used for entitlement and StoreKit event reporting.
     private let logger = SimpleLogger(category: .storeKit)
+
+    /// The asynchronous task that listens for StoreKit transaction updates.
     private var updatesTask: Task<Void, Never>?
+
+    /// The scheduled task that refreshes entitlements when a subscription expires.
     private var expiryTask: Task<Void, Never>?
+
+    /// The configuration describing the app’s capability rules and tier mappings.
     private let config: Capabilities
 
+    /// The fallback tier applied when no active entitlement or lifetime access exists.
+    ///
+    /// For example, an app may use a `.free` tier to represent users without a subscription.
     public var defaultTier: Group?
 
+    /// The set of all product identifiers currently owned by the user.
     public var purchasedProductIDs: Set<String>
+
+    /// The user’s currently active subscription entitlement, if any.
     public var activeSubscription: SubscriptionEntitlement<Group>?
+
+    /// The list of lifetime entitlements owned by the user.
     public var lifetimeEntitlements: [LifetimeEntitlement<Group>]
+
+    /// The list of consumable product balances (e.g., in-app credits or tokens).
     public var consumables: [ConsumableBalance]
 
+    /// A closure executed whenever entitlements are refreshed.
+    ///
+    /// This callback is invoked after transaction updates or explicit refresh operations.
     public var onRefresh: (() -> Void)?
 
     // MARK: - Initialization
 
-    /// Creates a new entitlement manager configured with the provided tier capabilities.
+    /// Creates a new entitlement manager configured with the specified capability set.
     ///
-    /// - Parameter config: The app’s tier capability configuration.
+    /// - Parameters:
+    ///   - config: The tier-capability configuration defining feature access and limits.
+    ///   - defaultTier: An optional fallback tier to apply when no entitlements are active.
     public init(config: Capabilities, defaultTier: Group? = nil) {
         self.expiryTask = nil
         self.defaultTier = defaultTier
@@ -56,6 +76,7 @@ public final class EntitlementManager<
         self.startObservingTransactions()
     }
 
+    /// Cancels all running background tasks before the manager is deallocated.
     isolated deinit {
         updatesTask?.cancel()
         expiryTask?.cancel()
@@ -86,10 +107,12 @@ extension EntitlementManager {
 
 extension EntitlementManager {
 
-    /// Refreshes the user’s entitlements by validating the latest App Store transactions.
+    /// Refreshes all entitlements by scanning verified StoreKit transactions.
     ///
-    /// Updates active subscriptions, lifetime entitlements, and purchased product IDs. Invokes
-    /// `onRefresh` when the refresh is complete.
+    /// Updates active subscriptions, lifetime purchases, and purchased product identifiers.
+    /// Posts `.entitlementsDidRefresh` when complete.
+    ///
+    /// - Note: This method should be called at launch and when the app becomes active.
     public func refreshEntitlements() async {
         var activeSub: SubscriptionEntitlement<Group>?
         var lifetimes: [LifetimeEntitlement<Group>] = []
@@ -100,52 +123,92 @@ extension EntitlementManager {
             if let revoked = t.revocationDate, revoked <= Date() { continue }
 
             activeIDs.insert(t.productID)
-            guard let group = Item.groupedByTier
-                .first(where: { $0.value.contains(where: { $0.rawValue == t.productID }) })?.key
-            else { continue }
-
-            switch t.productType {
-                case .autoRenewable, .nonRenewable:
-                    let sub = await buildSubscription(from: t, group: group)
-                    if let existing = activeSub, group.tierLevel < existing.tier.tierLevel {
-                        activeSub = sub
-                    } else if activeSub == nil {
-                        activeSub = sub
-                    }
-
-                case .nonConsumable:
-                    lifetimes.append(LifetimeEntitlement(productID: t.productID, tier: group))
-
-                case .consumable:
-                    logger.info("Consumable \(t.productID) purchased (tip jar style).")
-
-                default: break
-            }
+            await handleTransaction(t, activeSub: &activeSub, lifetimes: &lifetimes)
         }
 
-        self.activeSubscription = activeSub
-        self.lifetimeEntitlements = lifetimes
-        self.purchasedProductIDs = activeIDs
+        activeSubscription = activeSub
+        lifetimeEntitlements = lifetimes
+        purchasedProductIDs = activeIDs
 
         expiryTask?.cancel()
         if case .cancel(let date?) = activeSub?.renewalAction {
             scheduleExpiryRefresh(at: date)
         }
 
-        self.onRefresh?()
+        onRefresh?()
+        NotificationCenter.default.post(
+            name: .entitlementsDidRefresh,
+            object: self,
+            userInfo: ["entitlements": "refreshed"]
+        )
+    }
+
+    /// Processes a verified StoreKit transaction and updates local entitlement state.
+    ///
+    /// This method classifies the transaction by product type and updates either the active
+    /// subscription, the list of lifetime entitlements, or logs consumable purchases. It
+    /// determines the appropriate tier using the `Item.groupedByTier` mapping and ensures that
+    /// the highest-priority subscription tier remains active.
+    ///
+    /// - Parameters:
+    ///   - transaction: The verified StoreKit transaction to process.
+    ///   - activeSub: An in-out reference to the current active subscription entitlement, updated
+    ///   if the transaction represents a higher-tier or initial subscription.
+    ///   - lifetimes: An in-out collection of lifetime entitlements, appended to when the
+    ///   transaction represents a non-consumable (lifetime) product.
+    ///
+    /// - Note: Consumable transactions are logged but do not affect entitlement state.
+    private func handleTransaction(
+        _ transaction: Transaction,
+        activeSub: inout SubscriptionEntitlement<Group>?,
+        lifetimes: inout [LifetimeEntitlement<Group>]
+    ) async {
+        guard let group = Item.groupedByTier
+            .first(where: { $0.value.contains(where: { $0.rawValue == transaction.productID }) })?.key
+        else { return }
+
+        switch transaction.productType {
+            case .autoRenewable, .nonRenewable:
+                let sub = await buildSubscription(from: transaction, group: group)
+                if let existing = activeSub, group.tierLevel < existing.tier.tierLevel {
+                    activeSub = sub
+                } else if activeSub == nil {
+                    activeSub = sub
+                }
+
+            case .nonConsumable:
+                lifetimes.append(LifetimeEntitlement(productID: transaction.productID, tier: group))
+
+            case .consumable:
+                logger.info("Consumable \(transaction.productID) purchased (tip jar style).")
+
+            default:
+                break
+        }
     }
 }
 
 // MARK: - Subscription Building
 extension EntitlementManager {
 
-    /// Builds a `SubscriptionEntitlement` instance from a StoreKit transaction.
+    /// Builds a subscription entitlement model from a verified StoreKit transaction.
+    ///
+    /// This method extracts renewal and expiration details from the transaction’s
+    /// `subscriptionStatus`, determines the appropriate renewal action, and returns a
+    /// `SubscriptionEntitlement` instance describing the user’s current subscription state.
     ///
     /// - Parameters:
-    ///   - transaction: The StoreKit transaction representing the subscription.
-    ///   - group: The product tier associated with the transaction.
-    /// - Returns: A fully configured `SubscriptionEntitlement` object.
-    private func buildSubscription(from transaction: Transaction, group: Group) async -> SubscriptionEntitlement<Group> {
+    ///   - transaction: The verified StoreKit transaction representing a subscription purchase.
+    ///   - group: The tier group associated with the transaction’s product.
+    ///
+    /// - Returns: A `SubscriptionEntitlement` object populated with product, tier, expiration,
+    /// and renewal information.
+    ///
+    /// - Note: Unverified renewal information logs a warning and defaults to a cancelled state.
+    private func buildSubscription(
+        from transaction: Transaction,
+        group: Group
+    ) async -> SubscriptionEntitlement<Group> {
         var action: SubscriptionEntitlement<Group>.RenewalAction?
 
         if let status = await transaction.subscriptionStatus {
@@ -154,8 +217,7 @@ extension EntitlementManager {
                     action = renewalAction(for: info, transaction: transaction, group: group)
 
                 case .unverified(let info, let error):
-                    logger
-                        .warning("Unverified renewal info: \(info.debugDescription), error: \(error)")
+                    logger.warning("Unverified renewal info: \(info.debugDescription), error: \(error)")
                     action = .cancel(date: transaction.expirationDate)
             }
         }
@@ -168,8 +230,22 @@ extension EntitlementManager {
         )
     }
 
-    /// Determines the next renewal product identifier, if different from the current one.
-    private func nextRenewalProductID(from info: Product.SubscriptionInfo.RenewalInfo, currentID: String) -> String? {
+    /// Determines the product identifier of the next scheduled renewal, if it differs
+    /// from the current subscription product.
+    ///
+    /// This helper examines the renewal information to detect plan upgrades or downgrades
+    /// and returns the identifier of the product that will renew next.
+    ///
+    /// - Parameters:
+    ///   - info: The verified subscription renewal information from StoreKit.
+    ///   - currentID: The identifier of the currently active subscription product.
+    ///
+    /// - Returns: The identifier of the next renewal product if different from the current one,
+    ///   or `nil` if the subscription will renew under the same product.
+    private func nextRenewalProductID(
+        from info: Product.SubscriptionInfo.RenewalInfo,
+        currentID: String
+    ) -> String? {
         if let preference = info.autoRenewPreference, preference != currentID { return preference }
         let candidate = info.currentProductID
         return candidate == currentID ? nil : candidate
@@ -294,4 +370,12 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
         }
         return date
     }
+}
+
+// MARK: - Notifications
+
+extension Notification.Name {
+
+    /// Posted whenever entitlements finish refreshing.
+    public static let entitlementsDidRefresh = Notification.Name("EntitlementsDidRefresh")
 }
