@@ -384,6 +384,65 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
     }
 }
 
+// MARK: - Metadata
+
+extension EntitlementManager {
+
+    /// A concise summary of the user’s current entitlement state.
+    ///
+    /// Includes tier name, product ID, renewal action, next tier, and expiration details.
+    public var metadataSummary: [String: String] {
+        var info: [String: String] = [:]
+
+        if let sub = activeSubscription {
+            info["tier"] = String(localized: sub.tier.displayName)
+            info["product"] = sub.productID
+
+            if let expiry = sub.expirationDate {
+                info["expires"] = expiry.ISO8601Format()
+            }
+
+            guard let renewal = sub.renewalAction else { return info }
+
+            switch renewal {
+                case .renewSame(let group, let date):
+                    info["renewalAction"] = "renew"
+                    info["renewsAs"] = String(localized: group.displayName)
+                    if let date { info["renewsOn"] = date.ISO8601Format() }
+
+                case .upgrade(let group, _, let date):
+                    info["renewalAction"] = "upgrade"
+                    info["nextTier"] = String(localized: group.displayName)
+                    if let date { info["effectiveOn"] = date.ISO8601Format() }
+
+                case .downgrade(let group, _, let date):
+                    info["renewalAction"] = "downgrade"
+                    info["nextTier"] = String(localized: group.displayName)
+                    if let date { info["effectiveOn"] = date.ISO8601Format() }
+
+                case .cancel(let date):
+                    info["renewalAction"] = "cancel"
+                    if let date { info["expiresOn"] = date.ISO8601Format() }
+
+                default:
+                    break
+            }
+
+        } else if let lifetime = lifetimeEntitlements.first {
+            info["tier"] = String(localized: lifetime.tier.displayName)
+            info["product"] = lifetime.productID
+            info["expires"] = "never"
+
+        } else {
+            info["tier"] = "none"
+            info["product"] = "none"
+        }
+
+        return info
+    }
+}
+
+
 // MARK: - Notifications
 
 extension Notification.Name {
