@@ -47,6 +47,9 @@ public final class EntitlementManager<
     @ObservationIgnored
     private let refreshCooldown: TimeInterval = 5
 
+    @ObservationIgnored
+    private let appLaunchTime = Date()
+
 
 
     /// The configuration describing the app’s capability rules and tier mappings.
@@ -214,10 +217,19 @@ extension EntitlementManager {
             await handleTransaction(t, activeSub: &activeSub, lifetimes: &lifetimes)
         }
 
-        // if StoreKit returned nothing but we previously had valid data, keep it
-        if activeSub == nil && lifetimes.isEmpty && !purchasedProductIDs.isEmpty {
-            logger.info("Refresh ignored (empty response but previous entitlements exist)")
-            return
+        // Handle potential empty responses safely
+        let hasPreviousEntitlements = !purchasedProductIDs.isEmpty
+        let noCurrentEntitlements = activeSub == nil && lifetimes.isEmpty
+
+        if noCurrentEntitlements && hasPreviousEntitlements {
+            // If it's within the first 10 seconds after init, likely StoreKit not ready
+            let bootElapsed = Date().timeIntervalSince(appLaunchTime)
+            if bootElapsed < 10 {
+                logger.info("Refresh ignored (early boot empty response)")
+                return
+            } else {
+                logger.info("Entitlements cleared (user likely unsubscribed or expired)")
+            }
         }
 
         activeSubscription = activeSub
