@@ -81,17 +81,21 @@ public final class EntitlementManager<
     }
 
     /// Cancels all running background tasks before the manager is deallocated.
-//    deinit {
-//        updatesTask?.cancel()
-//        expiryTask?.cancel()
-//    }
+    //    deinit {
+    //        updatesTask?.cancel()
+    //        expiryTask?.cancel()
+    //    }
 
+    /// - Warning: Temporary workaround for a Swift 6.2 compiler issue where `deinit`containing
+    /// task cancellation causes build or archive failures. This method manually cancels the
+    /// background StoreKit observation and expiry tasks (`updatesTask` and `expiryTask`) and
+    /// should be called explicitly when tearing down the `EntitlementManager`. Remove this method
+    /// and restore the standard `deinit` cleanup once the compiler bug is resolved.
     public func invalidate() {
         updatesTask?.cancel()
         expiryTask?.cancel()
         updatesTask = nil
         expiryTask = nil
-
     }
 }
 
@@ -143,11 +147,17 @@ extension EntitlementManager {
         purchasedProductIDs = activeIDs
 
         expiryTask?.cancel()
-        if case .cancel(let date?) = activeSub?.renewalAction {
-            scheduleExpiryRefresh(at: date)
+        if let expiry = activeSub?.expirationDate {
+            scheduleExpiryRefresh(at: expiry)
         }
 
         onRefresh?()
+
+        logger
+            .info(
+                "Entitlement refresh complete. Active tier: \(String(localized: self.activeTier?.displayName ?? "none")) | Expiry: \(self.activeSubscription?.expirationDate?.ISO8601Format() ?? "none")"
+            )
+
         NotificationCenter.default.post(
             name: .entitlementsDidRefresh,
             object: self,
@@ -322,26 +332,43 @@ extension EntitlementManager {
 
     /// The currently active tier, accounting for subscriptions and lifetime entitlements.
     private var activeTier: Group? {
+
+        // Lifetime entitlements always override
         if let lifetime = lifetimeEntitlements.first { return lifetime.tier }
+
+        // Active subscription handling
         if let sub = activeSubscription {
-            if case .cancel(let expiry?) = sub.renewalAction, expiry.timeIntervalSinceNow <= 0 {
+            if let expiry = sub.expirationDate {
+
+                // If the expiry is in the future, user still has access (even if .cancelled)
+                if expiry > Date.now { return sub.tier }
                 return nil
             }
+            // Subscriptions with no expiry (lifetime, promo, etc.)
             return sub.tier
         }
+
+        // Nothing active
         return nil
     }
 
     /// The user’s effective tier used to determine feature availability.
     public var effectiveTier: Group? {
+
+        // Lifetime entitlements always override
         if let lifetime = lifetimeEntitlements.first { return lifetime.tier }
+
+        // Active subscription handling
         if let sub = activeSubscription {
-            if case .cancel(let expiry?) = sub.renewalAction, expiry.timeIntervalSinceNow <= 0 {
+            if let expiry = sub.expirationDate {
+                if expiry > Date.now { return sub.tier }
                 return nil
             }
             return sub.tier
         }
-        return nil
+
+        // Fallback tier if defined
+        return defaultTier
     }
 }
 
