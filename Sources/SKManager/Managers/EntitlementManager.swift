@@ -120,12 +120,15 @@ extension EntitlementManager {
     /// This task listens for verified transactions and triggers an entitlement refresh
     /// whenever a purchase or renewal event occurs.
     private func startObservingTransactions() {
-        updatesTask = Task(priority: .background) { [weak self] in
+        updatesTask?.cancel()
+        updatesTask = Task.detached(priority: .background) { [weak self] in
             guard let self else { return }
             for await update in Transaction.updates {
                 guard case .verified(let transaction) = update else { continue }
                 await transaction.finish()
-                await self.refreshEntitlements()
+                Task { @MainActor in
+                    await self.refreshEntitlements()
+                }
             }
         }
     }
@@ -367,12 +370,15 @@ extension EntitlementManager {
         expiryTask?.cancel()
         let delay = date.timeIntervalSinceNow
         guard delay > 0 else {
-            Task { await refreshEntitlements() }
+            Task { await self.refreshEntitlements() }
             return
         }
-        expiryTask = Task { [weak self] in
+        expiryTask = Task.detached(priority: .background) { [weak self] in
+            guard let self else { return }
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            await self?.refreshEntitlements()
+            Task { @MainActor in
+                await self.refreshEntitlements()
+            }
         }
     }
 }
