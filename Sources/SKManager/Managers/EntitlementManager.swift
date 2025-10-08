@@ -23,62 +23,62 @@ public final class EntitlementManager<
     Group: ProductTierRepresentable,
     Capabilities: TierCapabilities
 >: EntitlementProvider where Item.Tier == Group, Capabilities.Tier == Group {
-
+    
     // MARK: - Properties
-
+    
     /// Logger used for entitlement and StoreKit event reporting.
     private let logger = SimpleLogger(category: .storeKit)
-
+    
     /// The asynchronous task that listens for StoreKit transaction updates.
     @ObservationIgnored
     private var updatesTask: Task<Void, Never>?
-
+    
     /// The scheduled task that refreshes entitlements when a subscription expires.
     @ObservationIgnored
     private var expiryTask: Task<Void, Never>?
-
+    
     /// Prevents `refreshEntitlements()` from overlapping with itself.
     @ObservationIgnored
     private var isRefreshing = false
-
+    
     @ObservationIgnored
     private var lastRefreshTime = Date.distantPast
-
+    
     @ObservationIgnored
     private let refreshCooldown: TimeInterval = 5
-
+    
     @ObservationIgnored
-    private let appLaunchTime = Date()
-
-
-
+    private let appLaunchTime = Date.now
+    
+    
+    
     /// The configuration describing the app’s capability rules and tier mappings.
     private let config: Capabilities
-
+    
     /// The fallback tier applied when no active entitlement or lifetime access exists.
     ///
     /// For example, an app may use a `.free` tier to represent users without a subscription.
     public var defaultTier: Group?
-
+    
     /// The set of all product identifiers currently owned by the user.
     public var purchasedProductIDs: Set<String>
-
+    
     /// The user’s currently active subscription entitlement, if any.
     public var activeSubscription: SubscriptionEntitlement<Group>?
-
+    
     /// The list of lifetime entitlements owned by the user.
     public var lifetimeEntitlements: [LifetimeEntitlement<Group>]
-
+    
     /// The list of consumable product balances (e.g., in-app credits or tokens).
     public var consumables: [ConsumableBalance]
-
+    
     /// A closure executed whenever entitlements are refreshed.
     ///
     /// This callback is invoked after transaction updates or explicit refresh operations.
     public var onRefresh: (() -> Void)?
-
+    
     // MARK: - Initialization
-
+    
     /// Creates a new entitlement manager configured with the specified capability set.
     ///
     /// - Parameters:
@@ -92,22 +92,22 @@ public final class EntitlementManager<
         self.activeSubscription = nil
         self.lifetimeEntitlements = []
         self.consumables = []
-
+        
         // Start observing transactions early, but asynchronously.
         self.startObservingTransactions()
-
+        
         // Perform initial entitlement refresh once StoreKit is ready.
         Task { @MainActor in
             await self.bootstrapEntitlements()
         }
     }
-
+    
     /// Cancels all running background tasks before the manager is deallocated.
     //    deinit {
     //        updatesTask?.cancel()
     //        expiryTask?.cancel()
     //    }
-
+    
     /// - Warning: Temporary workaround for a Swift 6.2 compiler issue where `deinit`containing
     /// task cancellation causes build or archive failures. This method manually cancels the
     /// background StoreKit observation and expiry tasks (`updatesTask` and `expiryTask`) and
@@ -125,7 +125,7 @@ public final class EntitlementManager<
 // MARK: - Transaction Observation
 
 extension EntitlementManager {
-
+    
     /// Begins observing StoreKit transaction updates.
     ///
     /// This task listens for verified transactions and triggers an entitlement refresh
@@ -134,20 +134,20 @@ extension EntitlementManager {
         updatesTask?.cancel()
         updatesTask = Task.detached(priority: .background) { [weak self] in
             guard let self else { return }
-
+            
             // Track already handled transactions to stop StoreKit update loops.
             var handledTransactionIDs = Set<String>()
-
+            
             for await update in Transaction.updates {
                 guard case .verified(let transaction) = update else { continue }
-
+                
                 // Skip if already processed.
                 guard handledTransactionIDs.insert(transaction.id.description).inserted else {
                     continue
                 }
-
+                
                 await transaction.finish()
-
+                
                 Task { @MainActor in
                     await self.refreshEntitlements()
                 }
@@ -159,7 +159,7 @@ extension EntitlementManager {
 // MARK: - Bootstrapping
 
 extension EntitlementManager {
-
+    
     /// Attempts to load entitlements with retries to avoid StoreKit race conditions on launch.
     ///
     /// - Performs up to 5 attempts spaced 2 seconds apart.
@@ -167,19 +167,19 @@ extension EntitlementManager {
     private func bootstrapEntitlements() async {
         let maxAttempts = 5
         let retryDelay: UInt64 = 2_000_000_000 // 2 seconds
-
+        
         for attempt in 1...maxAttempts {
             await refreshEntitlements()
-
+            
             if activeSubscription != nil || !lifetimeEntitlements.isEmpty {
                 logger.info("Bootstrap succeeded on attempt \(attempt)")
                 return
             }
-
+            
             logger.info("Bootstrap attempt \(attempt) found no entitlements, retrying…")
             try? await Task.sleep(nanoseconds: retryDelay)
         }
-
+        
         logger.warning("Bootstrap completed with no entitlements after \(maxAttempts) attempts")
     }
 }
@@ -187,7 +187,7 @@ extension EntitlementManager {
 // MARK: - Entitlement Refresh
 
 extension EntitlementManager {
-
+    
     /// Refreshes all entitlements by scanning verified StoreKit transactions.
     ///
     /// Updates active subscriptions, lifetime purchases, and purchased product identifiers.
@@ -195,9 +195,9 @@ extension EntitlementManager {
     ///
     /// - Note: This method should be called at launch and when the app becomes active.
     public func refreshEntitlements() async {
-
+        
         if isRefreshing { return }
-        let now = Date()
+        let now = Date.now
         guard now.timeIntervalSince(lastRefreshTime) > refreshCooldown else {
             logger.debug("Skipping refresh within cooldown window")
             return
@@ -205,25 +205,25 @@ extension EntitlementManager {
         lastRefreshTime = now
         isRefreshing = true
         defer { isRefreshing = false }
-
+        
         var activeSub: SubscriptionEntitlement<Group>?
         var lifetimes: [LifetimeEntitlement<Group>] = []
         var activeIDs: Set<String> = []
-
+        
         for await result in Transaction.currentEntitlements {
             guard case .verified(let t) = result else { continue }
-            if let revoked = t.revocationDate, revoked <= Date() { continue }
+            if let revoked = t.revocationDate, revoked <= Date.now { continue }
             activeIDs.insert(t.productID)
             await handleTransaction(t, activeSub: &activeSub, lifetimes: &lifetimes)
         }
-
+        
         // Handle potential empty responses safely
         let hasPreviousEntitlements = !purchasedProductIDs.isEmpty
         let noCurrentEntitlements = activeSub == nil && lifetimes.isEmpty
-
+        
         if noCurrentEntitlements && hasPreviousEntitlements {
             // If it's within the first 10 seconds after init, likely StoreKit not ready
-            let bootElapsed = Date().timeIntervalSince(appLaunchTime)
+            let bootElapsed = Date.now.timeIntervalSince(appLaunchTime)
             if bootElapsed < 10 {
                 logger.info("Refresh ignored (early boot empty response)")
                 return
@@ -231,30 +231,30 @@ extension EntitlementManager {
                 logger.info("Entitlements cleared (user likely unsubscribed or expired)")
             }
         }
-
+        
         activeSubscription = activeSub
         lifetimeEntitlements = lifetimes
         purchasedProductIDs = activeIDs
-
+        
         expiryTask?.cancel()
         if let expiry = activeSub?.expirationDate {
             scheduleExpiryRefresh(at: expiry)
         }
-
+        
         onRefresh?()
-
+        
         logger.info(
             "Entitlement refresh complete. Active tier: \(String(localized: self.activeTier?.displayName ?? "none")) | Expiry: \(self.activeSubscription?.expirationDate?.ISO8601Format() ?? "none")"
         )
-
+        
         NotificationCenter.default.post(
             name: .entitlementsDidRefresh,
             object: self,
             userInfo: ["entitlements": "refreshed"]
         )
     }
-
-
+    
+    
     /// Processes a verified StoreKit transaction and updates local entitlement state.
     ///
     /// This method classifies the transaction by product type and updates either the active
@@ -278,7 +278,7 @@ extension EntitlementManager {
         guard let group = Item.groupedByTier
             .first(where: { $0.value.contains(where: { $0.rawValue == transaction.productID }) })?.key
         else { return }
-
+        
         switch transaction.productType {
             case .autoRenewable, .nonRenewable:
                 let sub = await buildSubscription(from: transaction, group: group)
@@ -287,13 +287,13 @@ extension EntitlementManager {
                 } else if activeSub == nil {
                     activeSub = sub
                 }
-
+                
             case .nonConsumable:
                 lifetimes.append(LifetimeEntitlement(productID: transaction.productID, tier: group))
-
+                
             case .consumable:
                 logger.info("Consumable \(transaction.productID) purchased (tip jar style).")
-
+                
             default:
                 break
         }
@@ -302,7 +302,7 @@ extension EntitlementManager {
 
 // MARK: - Subscription Building
 extension EntitlementManager {
-
+    
     /// Builds a subscription entitlement model from a verified StoreKit transaction.
     ///
     /// This method extracts renewal and expiration details from the transaction’s
@@ -322,18 +322,18 @@ extension EntitlementManager {
         group: Group
     ) async -> SubscriptionEntitlement<Group> {
         var action: SubscriptionEntitlement<Group>.RenewalAction?
-
+        
         if let status = await transaction.subscriptionStatus {
             switch status.renewalInfo {
                 case .verified(let info):
                     action = renewalAction(for: info, transaction: transaction, group: group)
-
+                    
                 case .unverified(let info, let error):
                     logger.warning("Unverified renewal info: \(info.debugDescription), error: \(error)")
                     action = .cancel(date: transaction.expirationDate)
             }
         }
-
+        
         return SubscriptionEntitlement(
             productID: transaction.productID,
             tier: group,
@@ -341,7 +341,7 @@ extension EntitlementManager {
             renewalAction: action
         )
     }
-
+    
     /// Determines the product identifier of the next scheduled renewal, if it differs
     /// from the current subscription product.
     ///
@@ -362,7 +362,7 @@ extension EntitlementManager {
         let candidate = info.currentProductID
         return candidate == currentID ? nil : candidate
     }
-
+    
     /// Determines the renewal action that applies to a subscription.
     ///
     /// - Parameters:
@@ -398,7 +398,7 @@ extension EntitlementManager {
 
 // MARK: - Expiry Scheduling
 extension EntitlementManager {
-
+    
     /// Schedules a refresh to occur when a subscription reaches its expiry date.
     ///
     /// - Parameter date: The scheduled expiration date.
@@ -422,17 +422,17 @@ extension EntitlementManager {
 // MARK: - Tier Access
 
 extension EntitlementManager {
-
+    
     /// The currently active tier, accounting for subscriptions and lifetime entitlements.
     private var activeTier: Group? {
-
+        
         // Lifetime entitlements always override
         if let lifetime = lifetimeEntitlements.first { return lifetime.tier }
-
+        
         // Active subscription handling
         if let sub = activeSubscription {
             if let expiry = sub.expirationDate {
-
+                
                 // If the expiry is in the future, user still has access (even if .cancelled)
                 if expiry > Date.now { return sub.tier }
                 return nil
@@ -440,17 +440,17 @@ extension EntitlementManager {
             // Subscriptions with no expiry (lifetime, promo, etc.)
             return sub.tier
         }
-
+        
         // Nothing active
         return nil
     }
-
+    
     /// The user’s effective tier used to determine feature availability.
     public var effectiveTier: Group? {
-
+        
         // Lifetime entitlements always override
         if let lifetime = lifetimeEntitlements.first { return lifetime.tier }
-
+        
         // Active subscription handling
         if let sub = activeSubscription {
             if let expiry = sub.expirationDate {
@@ -459,7 +459,7 @@ extension EntitlementManager {
             }
             return sub.tier
         }
-
+        
         // Fallback tier if defined
         return defaultTier
     }
@@ -468,7 +468,7 @@ extension EntitlementManager {
 // MARK: - Capability Access
 
 extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRule {
-
+    
     /// Checks whether the current user has access to the specified feature.
     public func hasAccess(to feature: Capabilities.Feature) -> Bool {
         let tier = activeTier ?? defaultTier
@@ -478,7 +478,7 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
         }
         return config.isAccessible(capability)
     }
-
+    
     /// Returns the limit value for a feature, if defined.
     ///
     /// For example, the number of months of data visible under a `.limit(Int)` rule.
@@ -490,7 +490,7 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
         }
         return value
     }
-
+    
     /// Returns the expiry date for a feature, if defined.
     ///
     /// For `.until(Date)` rules, this indicates when access ends.
@@ -507,57 +507,57 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
 // MARK: - Metadata
 
 extension EntitlementManager {
-
+    
     /// A concise summary of the user’s current entitlement state.
     ///
     /// Includes tier name, product ID, renewal action, next tier, and expiration details.
     public var metadataSummary: [String: String] {
         var info: [String: String] = [:]
-
+        
         if let sub = activeSubscription {
             info["tier"] = String(localized: sub.tier.displayName)
             info["product"] = sub.productID
-
+            
             if let expiry = sub.expirationDate {
                 info["expires"] = expiry.ISO8601Format()
             }
-
+            
             guard let renewal = sub.renewalAction else { return info }
-
+            
             switch renewal {
                 case .renewSame(let group, let date):
                     info["renewalAction"] = "renew"
                     info["renewsAs"] = String(localized: group.displayName)
                     if let date { info["renewsOn"] = date.ISO8601Format() }
-
+                    
                 case .upgrade(let group, _, let date):
                     info["renewalAction"] = "upgrade"
                     info["nextTier"] = String(localized: group.displayName)
                     if let date { info["effectiveOn"] = date.ISO8601Format() }
-
+                    
                 case .downgrade(let group, _, let date):
                     info["renewalAction"] = "downgrade"
                     info["nextTier"] = String(localized: group.displayName)
                     if let date { info["effectiveOn"] = date.ISO8601Format() }
-
+                    
                 case .cancel(let date):
                     info["renewalAction"] = "cancel"
                     if let date { info["expiresOn"] = date.ISO8601Format() }
-
+                    
                 default:
                     break
             }
-
+            
         } else if let lifetime = lifetimeEntitlements.first {
             info["tier"] = String(localized: lifetime.tier.displayName)
             info["product"] = lifetime.productID
             info["expires"] = "never"
-
+            
         } else {
             info["tier"] = "none"
             info["product"] = "none"
         }
-
+        
         return info
     }
 }
@@ -566,7 +566,7 @@ extension EntitlementManager {
 // MARK: - Notifications
 
 extension Notification.Name {
-
+    
     /// Posted whenever entitlements finish refreshing.
     public static let entitlementsDidRefresh = Notification.Name("EntitlementsDidRefresh")
 }
