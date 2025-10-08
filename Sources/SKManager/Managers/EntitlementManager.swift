@@ -77,7 +77,14 @@ public final class EntitlementManager<
         self.activeSubscription = nil
         self.lifetimeEntitlements = []
         self.consumables = []
+
+        // Start observing transactions early, but asynchronously.
         self.startObservingTransactions()
+
+        // Perform initial entitlement refresh once StoreKit is ready.
+        Task { @MainActor in
+            await self.bootstrapEntitlements()
+        }
     }
 
     /// Cancels all running background tasks before the manager is deallocated.
@@ -92,6 +99,7 @@ public final class EntitlementManager<
     /// should be called explicitly when tearing down the `EntitlementManager`. Remove this method
     /// and restore the standard `deinit` cleanup once the compiler bug is resolved.
     public func invalidate() {
+        logger.info("EntitlementManager invalidated")
         updatesTask?.cancel()
         expiryTask?.cancel()
         updatesTask = nil
@@ -116,6 +124,34 @@ extension EntitlementManager {
                 await self.refreshEntitlements()
             }
         }
+    }
+}
+
+// MARK: - Bootstrapping
+
+extension EntitlementManager {
+
+    /// Attempts to load entitlements with retries to avoid StoreKit race conditions on launch.
+    ///
+    /// - Performs up to 5 attempts spaced 2 seconds apart.
+    /// - Exits early if a valid entitlement is found.
+    private func bootstrapEntitlements() async {
+        let maxAttempts = 5
+        let retryDelay: UInt64 = 2_000_000_000 // 2 seconds
+
+        for attempt in 1...maxAttempts {
+            await refreshEntitlements()
+
+            if activeSubscription != nil || !lifetimeEntitlements.isEmpty {
+                logger.info("Bootstrap succeeded on attempt \(attempt)")
+                return
+            }
+
+            logger.info("Bootstrap attempt \(attempt) found no entitlements, retrying…")
+            try? await Task.sleep(nanoseconds: retryDelay)
+        }
+
+        logger.warning("Bootstrap completed with no entitlements after \(maxAttempts) attempts")
     }
 }
 
