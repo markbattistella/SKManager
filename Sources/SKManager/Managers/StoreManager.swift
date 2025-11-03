@@ -42,27 +42,35 @@ public final class StoreManager<
     // MARK: - Stored Properties
 
     /// Logger used for store and transaction-related diagnostics.
+    @ObservationIgnored
     private let logger = SimpleLogger(category: .storeKit)
 
     /// The entitlement manager that provides current user entitlement information.
+    @ObservationIgnored
     private let entitlementManager: E
 
     /// The configuration that defines lifetime tiers, upgrade permissions, and conflict logic.
+    @ObservationIgnored
     private let config: StoreConfig<Group, Item>
 
     /// Optional product-visibility rules controlling which products appear in the storefront.
+    @ObservationIgnored
     private let rules: StoreRules<Item>?
 
     /// The list of currently available StoreKit products.
+    @ObservationIgnored
     private var products: [Product] = []
 
     /// The grouped product buckets, organised by tier.
+    @ObservationIgnored
     private var buckets: [ProductBucket] = []
 
     /// The current purchase state for each product identifier.
+    @ObservationIgnored
     private var purchaseStates: [String: PurchaseState] = [:]
 
     /// The current product-fetch lifecycle state.
+    @ObservationIgnored
     private var fetchState: ProductFetchState = .idle
 
     /// Indicates whether the offer-code redemption sheet can be displayed.
@@ -73,6 +81,9 @@ public final class StoreManager<
 
     /// A Boolean value indicating whether the manager is currently fetching product information.
     public var isFetching: Bool { fetchState == .fetching }
+
+    /// The most recent error encountered during entitlement or transaction operations.
+    public private(set) var lastError: Error?
 
     // MARK: - Initialization
 
@@ -131,6 +142,7 @@ extension StoreManager {
             buckets = groupProducts(from: fetched)
             fetchState = .idle
         } catch {
+            lastError = error
             fetchState = .failed(error)
         }
     }
@@ -174,6 +186,7 @@ extension StoreManager {
 
                 case let .success(.unverified(_, error)):
                     purchaseStates[product.id] = .failed(error)
+                    lastError = error
 
                 case .pending:
                     purchaseStates[product.id] = .pending
@@ -185,6 +198,7 @@ extension StoreManager {
                     purchaseStates[product.id] = .ready(price: product.displayPrice)
             }
         } catch {
+            lastError = error
             purchaseStates[product.id] = .failed(error)
         }
     }

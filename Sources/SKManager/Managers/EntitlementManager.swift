@@ -50,9 +50,8 @@ public final class EntitlementManager<
     @ObservationIgnored
     private let appLaunchTime = Date.now
 
-
-
     /// The configuration describing the app’s capability rules and tier mappings.
+    @ObservationIgnored
     private let config: Capabilities
 
     /// The fallback tier applied when no active entitlement or lifetime access exists.
@@ -72,10 +71,24 @@ public final class EntitlementManager<
     /// The list of consumable product balances (e.g., in-app credits or tokens).
     public var consumables: [ConsumableBalance]
 
+    /// The most recent error encountered during entitlement or transaction operations.
+    public private(set) var lastError: Error?
+
     /// A closure executed whenever entitlements are refreshed.
     ///
     /// This callback is invoked after transaction updates or explicit refresh operations.
+    @ObservationIgnored
     public var onRefresh: (() -> Void)?
+
+    /// An asynchronous stream that emits a value whenever entitlements are refreshed.
+    ///
+    /// Use this stream in SwiftUI `.task` or background tasks to reactively handle entitlement
+    /// updates without relying on callbacks.
+    public var entitlementUpdates: AsyncStream<Void> {
+        AsyncStream { continuation in
+            self.onRefresh = { continuation.yield() }
+        }
+    }
 
     // MARK: - Initialization
 
@@ -147,10 +160,11 @@ extension EntitlementManager {
                 }
 
                 await transaction.finish()
-
                 Task { @MainActor in
                     await self.refreshEntitlements()
                 }
+
+                handledTransactionIDs.removeAll()
             }
         }
     }
@@ -212,7 +226,15 @@ extension EntitlementManager {
 
         for await result in Transaction.currentEntitlements {
             guard case .verified(let t) = result else { continue }
-            if let revoked = t.revocationDate, revoked <= Date.now { continue }
+            if let revoked = t.revocationDate, revoked <= Date.now {
+                logger.info("Revoked entitlement detected for \(t.productID)")
+                purchasedProductIDs.remove(t.productID)
+                lifetimeEntitlements.removeAll { $0.productID == t.productID }
+                if activeSubscription?.productID == t.productID {
+                    activeSubscription = nil
+                }
+                continue
+            }
             activeIDs.insert(t.productID)
             await handleTransaction(t, activeSub: &activeSub, lifetimes: &lifetimes)
         }
@@ -330,6 +352,7 @@ extension EntitlementManager {
 
                 case .unverified(let info, let error):
                     logger.warning("Unverified renewal info: \(info.debugDescription), error: \(error)")
+                    lastError = error
                     action = .cancel(date: transaction.expirationDate)
             }
         }
@@ -409,7 +432,7 @@ extension EntitlementManager {
             Task { await self.refreshEntitlements() }
             return
         }
-        expiryTask = Task.detached(priority: .background) { [weak self] in
+        expiryTask = Task(priority: .background) { [weak self] in
             guard let self else { return }
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             Task { @MainActor in
@@ -462,6 +485,31 @@ extension EntitlementManager {
 
         // Fallback tier if defined
         return defaultTier
+    }
+}
+
+// MARK: - Access Level Abstraction
+
+extension EntitlementManager {
+
+    /// Represents a simplified abstraction of user access level.
+    ///
+    /// This type provides a minimal representation of access state derived from the effective
+    /// tier. It is intended for high-level gating of features or UI presentation logic.
+    public enum AccessLevel {
+        case free
+        case tier(Int)
+    }
+
+    /// The user’s current access level, mapped to a simplified tier abstraction.
+    ///
+    /// Converts the effective entitlement tier into an `AccessLevel` for convenience in UI and
+    /// capability checks.
+    public var currentAccessLevel: AccessLevel {
+        if let tier = effectiveTier {
+            return .tier(tier.tierLevel)
+        }
+        return .free
     }
 }
 
