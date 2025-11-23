@@ -115,7 +115,6 @@ public final class StoreManager<
         // Automatically resyncs purchase state after entitlements refresh.
         entitlementManager.onRefresh = { [weak self] in
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 300_000_000) // debounce refresh
                 self?.syncPurchaseStates()
             }
         }
