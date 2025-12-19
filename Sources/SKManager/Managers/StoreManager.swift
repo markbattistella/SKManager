@@ -168,37 +168,57 @@ extension StoreManager {
 
 extension StoreManager {
 
-    /// Initiates a purchase for the given product.
+    /// Initiates a purchase for the specified StoreKit product.
     ///
-    /// Handles all StoreKit purchase outcomes and updates entitlement state accordingly.
+    /// This method starts the App Store purchase flow and handles all possible StoreKit outcomes,
+    /// including success, cancellation, pending approval, and failure. On a successful, verified
+    /// transaction, the purchase is finished, entitlements are refreshed, and internal purchase
+    /// state is synchronised before returning.
     ///
-    /// - Parameter product: The StoreKit product to purchase.
-    public func purchase(_ product: Product) async {
+    /// The returned `PurchaseOutcome` is intended to drive UI flow and control logic (such as
+    /// advancing a paywall), and should not be used as a proxy for entitlement state, which is
+    /// managed separately by the entitlement system.
+    ///
+    /// - Parameter product: The StoreKit `Product` to purchase.
+    /// - Returns: A `PurchaseOutcome` value describing the result of the attempted purchase.
+    ///
+    /// - Note: A `.success` result indicates that the transaction completed successfully and was
+    /// verified, but entitlement propagation may still complete asynchronously.
+    public func purchase(_ product: Product) async -> PurchaseOutcome {
         purchaseStates[product.id] = .purchasing
+
         do {
+
             let result = try await product.purchase()
+
             switch result {
                 case let .success(.verified(transaction)):
                     await transaction.finish()
                     await entitlementManager.refreshEntitlements()
                     syncPurchaseStates()
+                    return .success
 
                 case let .success(.unverified(_, error)):
                     purchaseStates[product.id] = .failed(error)
                     lastError = error
+                    return .failed(error)
 
                 case .pending:
                     purchaseStates[product.id] = .pending
+                    return .pending
 
                 case .userCancelled:
                     purchaseStates[product.id] = .ready(price: product.displayPrice)
+                    return .cancelled
 
                 @unknown default:
                     purchaseStates[product.id] = .ready(price: product.displayPrice)
+                    return .cancelled
             }
         } catch {
             lastError = error
             purchaseStates[product.id] = .failed(error)
+            return .failed(error)
         }
     }
 
@@ -393,5 +413,34 @@ extension StoreManager {
 
         /// Subscription is scheduled to activate or change in the future.
         case upcoming(activationDate: Date?)
+    }
+}
+
+// MARK: - Purchase Outcomes
+
+extension StoreManager {
+
+    /// Represents the result of an attempted StoreKit purchase.
+    ///
+    /// `PurchaseOutcome` provides a simplified, high-level abstraction over StoreKit’s purchase
+    /// result types, making it suitable for driving UI flow, navigation, and user feedback without
+    /// exposing StoreKit internals.
+    ///
+    /// This type is intentionally distinct from entitlement state; a `.success` outcome indicates
+    /// that the purchase transaction completed successfully, not that entitlements have already
+    /// been fully propagated through the app.
+    public enum PurchaseOutcome {
+
+        /// The purchase completed successfully and the transaction was verified.
+        case success
+
+        /// The user explicitly cancelled the purchase flow.
+        case cancelled
+
+        /// The purchase is pending external action.
+        case pending
+
+        /// The purchase failed due to an error.
+        case failed(Error)
     }
 }
