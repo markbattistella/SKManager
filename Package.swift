@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 5.10
 
 import PackageDescription
 
@@ -18,7 +18,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/markbattistella/SimpleLogger", from: "2.0.0")
+        .package(url: "https://github.com/markbattistella/SimpleLogger", from: "25.12.0")
     ],
     targets: [
         .target(
