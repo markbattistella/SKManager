@@ -34,12 +34,12 @@ extension CapabilityRule {
 
     /// Returns whether the capability is currently active or available.
     ///
-    /// - Note: Rules such as `.limit`, `.until`, and `.unrestricted` are considered accessible by
-    /// default, while `.unavailable` is not.
+    /// - Note: `.until(date)` is only accessible if the date has not yet passed.
     public var isAccessible: Bool {
         switch self {
             case .allowed(let flag): return flag
-            case .limit, .until, .unrestricted: return true
+            case .limit, .unrestricted: return true
+            case .until(let date): return date > Date.now
             case .unavailable: return false
         }
     }

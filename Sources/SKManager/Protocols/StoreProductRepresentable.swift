@@ -5,7 +5,7 @@
 //
 
 import Foundation
-import StoreKit.SKProduct
+import StoreKit
 
 /// A protocol that defines a type representing an App Store product, such as a subscription,
 /// consumable, or non-consumable item.

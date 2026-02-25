@@ -58,19 +58,15 @@ public final class StoreManager<
     private let rules: StoreRules<Item>?
 
     /// The list of currently available StoreKit products.
-    @ObservationIgnored
     private var products: [Product] = []
 
     /// The grouped product buckets, organised by tier.
-    @ObservationIgnored
     private var buckets: [ProductBucket] = []
 
     /// The current purchase state for each product identifier.
-    @ObservationIgnored
     private var purchaseStates: [String: PurchaseState] = [:]
 
     /// The current product-fetch lifecycle state.
-    @ObservationIgnored
     private var fetchState: ProductFetchState = .idle
 
     /// Indicates whether the offer-code redemption sheet can be displayed.
@@ -151,7 +147,7 @@ extension StoreManager {
     /// - Parameter products: The list of fetched `Product` objects.
     /// - Returns: An array of product buckets grouped by tier.
     private func groupProducts(from products: [Product]) -> [ProductBucket] {
-        Item.groupedByTier.map { (tier, ids) in
+        Item.groupedByTier.sorted { $0.key.tierLevel < $1.key.tierLevel }.map { (tier, ids) in
             let matches = products
                 .compactMap { p -> (Item, Product)? in
                     guard let id = Item(rawValue: p.id) else { return nil }
@@ -179,17 +175,27 @@ extension StoreManager {
     /// advancing a paywall), and should not be used as a proxy for entitlement state, which is
     /// managed separately by the entitlement system.
     ///
-    /// - Parameter product: The StoreKit `Product` to purchase.
+    /// - Parameters:
+    ///   - product: The StoreKit `Product` to purchase.
+    ///   - options: Optional purchase options such as promotional offers or quantity. Defaults to
+    ///   an empty set.
     /// - Returns: A `PurchaseOutcome` value describing the result of the attempted purchase.
     ///
     /// - Note: A `.success` result indicates that the transaction completed successfully and was
     /// verified, but entitlement propagation may still complete asynchronously.
-    public func purchase(_ product: Product) async -> PurchaseOutcome {
+    public func purchase(
+        _ product: Product,
+        options: Set<Product.PurchaseOption> = []
+    ) async -> PurchaseOutcome {
+        guard AppStore.canMakePayments else {
+            purchaseStates[product.id] = .ready(price: product.displayPrice)
+            return .failed(StoreError.purchasesUnavailable)
+        }
+
         purchaseStates[product.id] = .purchasing
 
         do {
-
-            let result = try await product.purchase()
+            let result = try await product.purchase(options: options)
 
             switch result {
                 case let .success(.verified(transaction)):
@@ -243,6 +249,8 @@ extension StoreManager {
         let owned = entitlementManager.purchasedProductIDs
         guard let rules else { return bucket.items }
 
+        if rules.hiddenGroups(for: owned).contains(group) { return [] }
+
         let hidden = rules.hiddenProducts(for: owned)
         let visible = rules.visibleProducts(for: owned)
 
@@ -294,12 +302,14 @@ extension StoreManager {
                     purchaseStates[activeID] = .ready(price: product.displayPrice)
                 }
             } else {
-                purchaseStates[activeID] = .active(type: .autoRenewable)
+                purchaseStates[activeID] = .active(type: product.type)
             }
         }
 
         switch sub.renewalAction {
-            case .crossgrade(let nextID, let date), .downgrade(_, let nextID, let date):
+            case .upgrade(_, let nextID, let date),
+                 .crossgrade(let nextID, let date),
+                 .downgrade(_, let nextID, let date):
                 if products.contains(where: { $0.id == nextID }) {
                     purchaseStates[nextID] = .upcoming(activationDate: date)
                 }
@@ -338,6 +348,18 @@ extension StoreManager {
                 return false
         }
     }
+
+    /// Returns whether the user can initiate a purchase for the given product.
+    ///
+    /// Returns `false` when purchases are device-restricted, or when the product is already
+    /// active, upcoming, or currently being purchased.
+    public func canPurchase(_ product: Product) -> Bool {
+        guard AppStore.canMakePayments else { return false }
+        switch purchaseState(for: product) {
+            case .active, .upcoming, .purchasing: return false
+            default: return true
+        }
+    }
 }
 
 // MARK: - Conflict Detection
@@ -347,31 +369,55 @@ extension StoreManager {
     /// Indicates whether the user owns conflicting products or tiers.
     ///
     /// Evaluates both tier-level and product-level conflicts as defined in `StoreConfig`.
+    /// The underlying conflict logic lives on `StoreConfig.hasConflicts(activeTiers:ownedProducts:)`
+    /// and can be tested independently.
     public var hasConflictingPlans: Bool {
-        for (tier, conflicts) in config.conflictGroups {
-            let hasTier = entitlementManager.lifetimeEntitlements .contains { $0.tier == tier }
-            || entitlementManager.activeSubscription?.tier == tier
+        var activeTiers: Set<Group> = []
+        for lifetime in entitlementManager.lifetimeEntitlements {
+            activeTiers.insert(lifetime.tier)
+        }
+        if let tier = entitlementManager.activeSubscription?.tier {
+            activeTiers.insert(tier)
+        }
+        return config.hasConflicts(
+            activeTiers: activeTiers,
+            ownedProducts: entitlementManager.purchasedProductIDs
+        )
+    }
+}
 
-            guard hasTier else { continue }
+// MARK: - Transaction History
 
-            for other in conflicts {
-                let hasOther = entitlementManager.lifetimeEntitlements.contains { $0.tier == other }
-                || entitlementManager.activeSubscription?.tier == other
+extension StoreManager {
 
-                if hasOther { return true }
+    /// Returns all verified transactions for the current account, regardless of product type.
+    ///
+    /// Useful for building a purchase history screen, auditing owned items, or providing
+    /// a "Request Refund" flow where the app needs a transaction identifier.
+    ///
+    /// - Returns: All currently verified transactions from `Transaction.all`.
+    public func allTransactions() async -> [Transaction] {
+        var result: [Transaction] = []
+        for await item in Transaction.all {
+            if case .verified(let transaction) = item {
+                result.append(transaction)
             }
         }
+        return result
+    }
 
-        for (item, conflicts) in config.conflictProducts {
-            let owned = entitlementManager.purchasedProductIDs
-            guard owned.contains(item.rawValue) else { continue }
-
-            for other in conflicts where owned.contains(other.rawValue) {
-                return true
+    /// Returns the most recent verified transaction for the given product identifier, or `nil`
+    /// if no transaction exists.
+    ///
+    /// - Parameter productID: The product identifier to look up.
+    /// - Returns: The latest verified transaction, or `nil`.
+    public func latestTransaction(for productID: String) async -> Transaction? {
+        for await item in Transaction.all {
+            if case .verified(let transaction) = item, transaction.productID == productID {
+                return transaction
             }
         }
-
-        return false
+        return nil
     }
 }
 
@@ -416,31 +462,3 @@ extension StoreManager {
     }
 }
 
-// MARK: - Purchase Outcomes
-
-extension StoreManager {
-
-    /// Represents the result of an attempted StoreKit purchase.
-    ///
-    /// `PurchaseOutcome` provides a simplified, high-level abstraction over StoreKit’s purchase
-    /// result types, making it suitable for driving UI flow, navigation, and user feedback without
-    /// exposing StoreKit internals.
-    ///
-    /// This type is intentionally distinct from entitlement state; a `.success` outcome indicates
-    /// that the purchase transaction completed successfully, not that entitlements have already
-    /// been fully propagated through the app.
-    public enum PurchaseOutcome {
-
-        /// The purchase completed successfully and the transaction was verified.
-        case success
-
-        /// The user explicitly cancelled the purchase flow.
-        case cancelled
-
-        /// The purchase is pending external action.
-        case pending
-
-        /// The purchase failed due to an error.
-        case failed(Error)
-    }
-}

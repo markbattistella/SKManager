@@ -22,7 +22,8 @@ public protocol ProductTierRepresentable: StoreIdentifiable {
 
     /// The tier’s relative level used for comparison and sorting.
     ///
-    /// Lower values usually indicate a more basic plan, while higher values represent more
-    /// advanced or premium tiers.
+    /// Lower values indicate a more advanced or premium tier (e.g. `.pro` = 1), while higher
+    /// values represent more basic tiers (e.g. `.free` = 99). This convention is used
+    /// throughout the package when determining upgrade/downgrade direction and tier priority.
     var tierLevel: Int { get }
 }

@@ -1,27 +1,16 @@
 //
-// Project: StoreManager
+// Project: SKManager
 // Author: Mark Battistella
 // Website: https://markbattistella.com
 //
 
 import Foundation
 
-/// A configuration model defining store behaviour, upgrade logic, and conflict rules.
+/// A configuration model defining store behaviour and conflict rules.
 ///
 /// `StoreConfig` is used by store management components to determine how products and tiers
-/// interact, including upgrade eligibility, lifetime access, and product conflicts.
-public struct StoreConfig<Group: ProductTierRepresentable, Item: StoreProductRepresentable> {
-
-    /// The set of tiers that represent lifetime entitlements (non-expiring access).
-    internal let lifetimeGroups: [Group]
-
-    /// A closure defining the logic for whether a user can upgrade from one tier to another.
-    ///
-    /// - Parameters:
-    ///   - targetTier: The tier being upgraded to.
-    ///   - ownedProductIDs: The set of currently owned product identifiers.
-    /// - Returns: `true` if the upgrade is permitted; otherwise `false`.
-    internal let upgradeLogic: (Group, Set<String>) -> Bool
+/// interact, including product and tier conflict detection.
+public struct StoreConfig<Group: ProductTierRepresentable, Item: StoreProductRepresentable>: Sendable {
 
     /// A mapping that defines which tiers are incompatible with each other.
     ///
@@ -34,25 +23,51 @@ public struct StoreConfig<Group: ProductTierRepresentable, Item: StoreProductRep
     internal let conflictProducts: [Item: [Item]]
 
     public init(
-        lifetimeGroups: [Group],
-        upgradeLogic: @escaping (Group, Set<String>) -> Bool,
-        conflictGroups: [Group : [Group]],
-        conflictProducts: [Item : [Item]]
+        conflictGroups: [Group: [Group]],
+        conflictProducts: [Item: [Item]]
     ) {
-        self.lifetimeGroups = lifetimeGroups
-        self.upgradeLogic = upgradeLogic
         self.conflictGroups = conflictGroups
         self.conflictProducts = conflictProducts
     }
 
-    /// A default configuration with no lifetime tiers, universal upgrade permission, and no
-    /// conflicts defined.
+    /// A default configuration with no conflicts defined.
     public static var defaultConfig: Self {
         .init(
-            lifetimeGroups: [],
-            upgradeLogic: { _, _ in true },
             conflictGroups: [:],
             conflictProducts: [:]
         )
+    }
+}
+
+// MARK: - Conflict Detection
+
+extension StoreConfig {
+
+    /// Returns `true` if the provided active tiers or owned product IDs conflict according to
+    /// the configured rules.
+    ///
+    /// Extracted from `StoreManager` so that conflict logic can be tested independently without
+    /// requiring a fully initialised store or StoreKit products.
+    ///
+    /// - Parameters:
+    ///   - activeTiers: All tiers currently active for the user (subscriptions + lifetime
+    ///   entitlements).
+    ///   - ownedProducts: All product identifiers currently owned by the user.
+    /// - Returns: `true` if any tier or product conflict is detected.
+    public func hasConflicts(
+        activeTiers: Set<Group>,
+        ownedProducts: Set<String>
+    ) -> Bool {
+        for (tier, conflicts) in conflictGroups {
+            guard activeTiers.contains(tier) else { continue }
+            if conflicts.contains(where: { activeTiers.contains($0) }) { return true }
+        }
+
+        for (item, conflicts) in conflictProducts {
+            guard ownedProducts.contains(item.rawValue) else { continue }
+            if conflicts.contains(where: { ownedProducts.contains($0.rawValue) }) { return true }
+        }
+
+        return false
     }
 }

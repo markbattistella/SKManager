@@ -9,217 +9,435 @@
 
 </div>
 
-`SKManager` is a modular, strongly typed StoreKit 2 framework for Swift applications that simplifies product management, entitlement tracking, and feature gating across iOS, macOS, tvOS, and watchOS. It provides a clean abstraction layer between StoreKit and your app’s logic, offering clear configuration, conflict detection, and entitlement synchronisation.
+`SKManager` is a strongly typed StoreKit 2 framework for Swift. It handles product fetching, purchasing, and entitlement tracking across all four IAP types (auto-renewable, non-renewable, non-consumable, consumable), and adds a visibility rules system purpose-built for custom paywalls — where owning one product should affect which others are offered.
 
 ---
 
-## Features
+## Why SKManager?
 
-- **Unified StoreKit Abstraction:** A complete model for product fetching, purchasing, and entitlement synchronisation.
-- **Type-Safe Architecture:** All products, tiers, and capabilities are represented as Swift protocols and generics.
-- **Observable and SwiftUI-Ready:** All core managers conform to `@MainActor` and `@Observable` for real-time UI updates.
-- **Configurable Store Logic:** Define custom upgrade paths, conflicts, and visibility rules.
-- **Automatic Entitlement Refresh:** Responds to StoreKit transaction updates and subscription renewals.
-- **Feature Access Control:** Gate app functionality based on purchased tiers.
+Most StoreKit wrappers handle purchasing but leave display logic up to you. SKManager solves the harder problem: **how do you build a paywall where ownership of one product changes what else is shown?**
+
+- Owning a family lifetime should hide the subscription tier entirely
+- Being on a basic subscription should reveal a lifetime upgrade option
+- Owning an annual plan should hide the monthly option
+- Pro subscribers can export; free users cannot; family plans get everything
+
+All of this is expressed declaratively through `StoreRules` and `TierCapabilities`, not ad-hoc `if` statements scattered through view code.
+
+---
+
+## Requirements
+
+- iOS 17+, macOS 14+, tvOS 17+, watchOS 10+, visionOS 1+
+- Swift 6
 
 ---
 
 ## Installation
 
-Add `SKManager` to your Swift project using Swift Package Manager.
-
 ```swift
+// Package.swift
 dependencies: [
-  .package(url: "https://github.com/markbattistella/SKManager", from: "1.0.0")
+    .package(url: "https://github.com/markbattistella/SKManager", from: "1.0.0")
 ]
 ```
 
-Alternatively, in Xcode:
+Or in Xcode: **File → Add Package Dependencies** → `https://github.com/markbattistella/SKManager`
 
-`File > Add Packages > https://github.com/markbattistella/SKManager`
+---
 
-## Usage
+## Core Concepts
 
-### Core Components
+| Type | Role |
+| --- | --- |
+| `EntitlementManager` | Source of truth for what the user owns |
+| `StoreManager` | Fetches products, drives purchases, exposes per-product states |
+| `ConsumableManager` | Dedicated manager for consumable products (credits, tips, tokens) |
+| `StoreRules` | Declarative visibility rules — what to show/hide based on ownership |
+| `TierCapabilities` | Maps features to tiers with `CapabilityRule` values |
+| `StoreConfig` | Declares which tiers/products conflict (should not coexist) |
 
-#### `StoreManager`
+---
 
-`StoreManager` handles fetching, purchasing, and restoring StoreKit products while maintaining synchronised purchase states.
+## Setup
 
-```swift
-import SKManager
-import SimpleLogger
-
-@MainActor
-@Observable
-final class MyStore: StoreManager<MyProduct, MyTier, MyEntitlementManager> {}
-```
-
-Basic usage example:
+### 1. Define your tiers
 
 ```swift
-let manager = StoreManager(
-    entitlementManager: myEntitlementManager,
-    config: .defaultConfig,
-    rules: nil
-)
+enum AppTier: Int, ProductTierRepresentable {
+    case pro       // tierLevel = 1  (most premium)
+    case basic     // tierLevel = 2
+    case family    // tierLevel = 3  (could be same or different)
 
-Task {
-    await manager.refreshAll()
-    if let product = manager.product(with: "com.myapp.pro") {
-        await manager.purchase(product)
-    }
-}
-```
-
-#### `EntitlementManager`
-
-Tracks and validates entitlements by observing StoreKit transactions, maintaining the current subscription, lifetime, and consumable states.
-
-```swift
-let entitlementManager = EntitlementManager<MyProduct, MyTier, MyCapabilities>(config: MyCapabilities())
-await entitlementManager.refreshEntitlements()
-```
-
-Entitlement checks:
-
-```swift
-if entitlementManager.hasAccess(to: .advancedFeature) {
-    // Enable feature
-}
-```
-
-#### `StoreConfig`
-
-Defines upgrade rules and product conflicts.
-
-| Property           | Description                                            |
-| ------------------ | ------------------------------------------------------ |
-| `lifetimeGroups`   | Tiers with lifetime (non-expiring) access.             |
-| `upgradeLogic`     | Closure that determines whether an upgrade is allowed. |
-| `conflictGroups`   | Defines tier-level conflicts.                          |
-| `conflictProducts` | Defines product-level conflicts.                       |
-
-Example:
-
-```swift
-let config = StoreConfig(
-    lifetimeGroups: [.lifetime],
-    upgradeLogic: { target, owned in target.tierLevel > 0 && !owned.isEmpty },
-    conflictGroups: [.pro: [.basic]],
-    conflictProducts: [.premium: [.standard]]
-)
-```
-
-#### `StoreRules`
-
-Manages product visibility depending on ownership.
-
-```swift
-let rules = StoreRules(
-    defaultVisible: [.basic],
-    hideMap: [.basic: [.basic]],
-    showMap: [.pro: [.premiumUpgrade]]
-)
-```
-
-#### `TierCapabilities`
-
-Defines what features each tier grants access to.
-
-```swift
-enum MyTier: Int, ProductTierRepresentable {
-    case free, pro
-    var displayName: LocalizedStringResource { "Pro Tier" }
-    var description: LocalizedStringResource { "Unlocks all premium features." }
+    var displayName: LocalizedStringResource { ... }
+    var description: LocalizedStringResource { ... }
     var tierLevel: Int { rawValue }
 }
-
-struct MyCapabilities: TierCapabilities {
-    func allows(_ feature: Feature, for tier: MyTier) -> Bool {
-        switch (feature, tier) {
-        case (.premiumFeature, .pro): return true
-        default: return false
-        }
-    }
-}
 ```
 
-## Product Model Protocols
+Lower `tierLevel` = more premium. This drives upgrade/downgrade detection.
 
-| Protocol                    | Purpose                                                   |
-| --------------------------- | --------------------------------------------------------- |
-| `StoreProductRepresentable` | Describes StoreKit products, including type and grouping. |
-| `ProductTierRepresentable`  | Defines tier hierarchy and metadata.                      |
-| `EntitlementProvider`       | Interface for entitlement tracking.                       |
-| `StoreIdentifiable`         | Provides case-based string identifiers.                   |
-
-Example product enum:
+### 2. Define your products
 
 ```swift
-enum MyProduct: String, StoreProductRepresentable {
-    case proMonthly = "com.myapp.pro.monthly"
-    case proYearly = "com.myapp.pro.yearly"
+enum AppProduct: String, StoreProductRepresentable, CaseIterable {
+    case proMonthly    = "com.app.pro.monthly"
+    case proYearly     = "com.app.pro.yearly"
+    case basicMonthly  = "com.app.basic.monthly"
+    case familyLifetime = "com.app.family.lifetime"
 
-    var sortOrder: Int { self == .proMonthly ? 0 : 1 }
-    var productType: Product.ProductType { .autoRenewable }
+    typealias Tier = AppTier
 
-    static var groupedByTier: [MyTier: [Self]] {
-        [.pro: [.proMonthly, .proYearly]]
+    var sortOrder: Int { ... }
+
+    var productType: Product.ProductType {
+        switch self {
+        case .familyLifetime: return .nonConsumable
+        default: return .autoRenewable
+        }
+    }
+
+    static var groupedByTier: [AppTier: [AppProduct]] {
+        [
+            .pro:    [.proMonthly, .proYearly],
+            .basic:  [.basicMonthly],
+            .family: [.familyLifetime]
+        ]
     }
 }
 ```
 
-## Purchase States
+### 3. Define your capabilities
 
-`StoreManager` exposes granular `PurchaseState` values for each product:
+```swift
+enum Feature { case export, darkMode, cloudSync }
 
-| State                        | Meaning                                         |
-| ---------------------------- | ----------------------------------------------- |
-| `.ready(price:)`             | Product available for purchase.                 |
-| `.purchasing`                | Currently processing purchase.                  |
-| `.pending`                   | Awaiting confirmation.                          |
-| `.failed(Error)`             | Purchase failed.                                |
-| `.active(type:)`             | Active ownership (subscription or lifetime).    |
-| `.cancelled(timeRemaining:)` | Subscription cancelled but active until expiry. |
-| `.upcoming(activationDate:)` | Future upgrade or downgrade scheduled.          |
+struct AppCapabilities: TierCapabilities {
+    typealias Tier = AppTier
+    typealias Feature = Feature
+    typealias CapabilityValue = CapabilityRule
 
-## Entitlement Flow
+    var capabilities: [Feature: [AppTier: CapabilityRule]] {
+        [
+            .export:    [.pro: .unrestricted, .basic: .unavailable, .family: .unrestricted],
+            .darkMode:  [.pro: .allowed(true), .basic: .allowed(true), .family: .allowed(true)],
+            .cloudSync: [.pro: .unrestricted, .basic: .limit(30), .family: .unrestricted]
+        ]
+    }
+}
+```
 
-1. `EntitlementManager` observes StoreKit `Transaction.updates`.
-1. Verified transactions update purchased IDs.
-1. `StoreManager` syncs purchase states.
-1. UI updates automatically via SwiftUI observation.
+### 4. Define your store rules
 
-## Example Integration
+This is the key differentiator. `StoreRules` controls what appears on your paywall based on what the user already owns.
+
+```swift
+let rules = StoreRules<AppProduct>(
+    // Products shown when user owns nothing
+    defaultVisible: [.proMonthly, .proYearly, .basicMonthly],
+
+    // When user owns X, hide Y from storefront
+    hideMap: [
+        .proYearly:  [.proMonthly],    // owning annual → hide monthly
+        .basicMonthly: [.proMonthly]   // owning basic → hide pro monthly (show yearly upgrade instead)
+    ],
+
+    // When user owns X, show Y (normally hidden)
+    showMap: [
+        .basicMonthly: [.familyLifetime]   // on basic sub → reveal family lifetime
+    ],
+
+    // When user owns X, hide the entire tier group
+    groupHideMap: [
+        .familyLifetime: [.pro, .basic]    // owning family lifetime → hide all subscription tiers
+    ]
+)
+```
+
+### 5. Wire it together
 
 ```swift
 @main
 struct MyApp: App {
-    @StateObject private var entitlementManager =
-        EntitlementManager<MyProduct, MyTier, MyCapabilities>(config: MyCapabilities())
 
-    @StateObject private var storeManager: StoreManager<MyProduct, MyTier, EntitlementManager<MyProduct, MyTier, MyCapabilities>>
+    @State private var entitlementManager = EntitlementManager<AppProduct, AppTier, AppCapabilities>(
+        config: AppCapabilities(),
+        defaultTier: nil  // nil = unauthenticated/free state
+    )
+
+    @State private var storeManager: MyStoreManager
 
     init() {
-        _storeManager = StateObject(wrappedValue: StoreManager(
-            entitlementManager: entitlementManager,
-            config: .defaultConfig
+        let em = EntitlementManager<AppProduct, AppTier, AppCapabilities>(
+            config: AppCapabilities()
+        )
+        _entitlementManager = State(initialValue: em)
+        _storeManager = State(initialValue: MyStoreManager(
+            entitlementManager: em,
+            config: .defaultConfig,
+            rules: rules
         ))
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(storeManager)
+                .environment(entitlementManager)
+                .environment(storeManager)
         }
+    }
+}
+
+// Subclass StoreManager to add your app-specific logic
+@MainActor @Observable
+final class MyStoreManager: StoreManager<AppProduct, AppTier, EntitlementManager<AppProduct, AppTier, AppCapabilities>> {}
+```
+
+> **Note:** Call `entitlementManager.invalidate()` and `consumableManager.invalidate()` when tearing
+> down to cancel background tasks. This is a temporary workaround for a Swift 6.2 compiler issue.
+
+---
+
+## Displaying Products
+
+`StoreManager.products(for:)` returns only the products the user should see for a given tier, after applying `StoreRules`.
+
+```swift
+struct PaywallView: View {
+    @Environment(MyStoreManager.self) var store
+
+    var body: some View {
+        VStack {
+            // Only shows products that pass visibility rules for the user's current ownership
+            ForEach(store.products(for: .pro), id: \.id) { product in
+                ProductRow(product: product, store: store)
+            }
+            ForEach(store.products(for: .basic), id: \.id) { product in
+                ProductRow(product: product, store: store)
+            }
+        }
+        .task { await store.refreshAll() }
     }
 }
 ```
 
+---
+
+## Purchasing
+
+```swift
+let outcome = await store.purchase(product)
+// or with promotional offers:
+let outcome = await store.purchase(product, options: [.promotionalOffer(offerID: id, keyID: keyID, nonce: nonce, signature: signature, timestamp: ts)])
+
+switch outcome {
+case .success:   dismiss()
+case .cancelled: break
+case .pending:   showPendingBanner()
+case .failed(let error):
+    if let storeError = error as? StoreError, storeError == .purchasesUnavailable {
+        showParentalControlsAlert()
+    } else {
+        showGenericError(error)
+    }
+}
+```
+
+Before showing a "Buy" button, use `canPurchase` to avoid presenting already-active products:
+
+```swift
+Button("Subscribe") {
+    Task { await store.purchase(product) }
+}
+.disabled(!store.canPurchase(product))
+```
+
+---
+
+## Purchase States
+
+Each product has a `PurchaseState` you can read from `store.purchaseState(for: product)`:
+
+| State | Meaning |
+| --- | --- |
+| `.ready(price:)` | Available for purchase |
+| `.purchasing` | Purchase flow in progress |
+| `.pending` | Awaiting parent/Ask to Buy approval |
+| `.failed(Error)` | Purchase failed |
+| `.active(type:)` | Currently owned and active |
+| `.cancelled(timeRemaining:)` | Cancelled but access continues until expiry |
+| `.upcoming(activationDate:)` | Scheduled upgrade or downgrade |
+
+```swift
+switch store.purchaseState(for: product) {
+case .active:
+    Label("Current plan", systemImage: "checkmark.circle.fill")
+case .cancelled(let remaining):
+    Text("Expires in \(remaining.formatted())")
+case .upcoming(let date):
+    Text("Activates \(date?.formatted() ?? "soon")")
+default:
+    Text(product.displayPrice)
+}
+```
+
+---
+
+## Feature Access
+
+Check capabilities from `EntitlementManager`:
+
+```swift
+@Environment(EntitlementManager<AppProduct, AppTier, AppCapabilities>.self) var entitlements
+
+// Can the user export?
+if entitlements.hasAccess(to: .export) { ... }
+
+// How many months of history can they see?
+let months = entitlements.limit(for: .cloudSync) ?? 0
+
+// When does their trial feature expire?
+let expiry = entitlements.expiry(for: .darkMode)
+
+// What tier are they on?
+switch entitlements.effectiveTier {
+case .pro:    showProUI()
+case .basic:  showBasicUI()
+case .family: showFamilyUI()
+case nil:     showFreeUI()
+}
+```
+
+### `CapabilityRule` values
+
+| Rule | `isAccessible` | Use case |
+| --- | --- | --- |
+| `.allowed(true)` | `true` | Simple on/off toggle |
+| `.allowed(false)` | `false` | Feature blocked for tier |
+| `.limit(n)` | `true` | Access with quantity cap (check `.limit`) |
+| `.until(date)` | `date > now` | Time-bounded access |
+| `.unrestricted` | `true` | Full access, no limit |
+| `.unavailable` | `false` | Feature does not exist at this tier |
+
+---
+
+## Family Sharing
+
+Both `LifetimeEntitlement` and `SubscriptionEntitlement` expose ownership type:
+
+```swift
+if let sub = entitlements.activeSubscription, sub.isFamilyShared {
+    Text("Shared via Family Sharing")
+}
+
+for lifetime in entitlements.lifetimeEntitlements where lifetime.isFamilyShared {
+    Text("\(lifetime.productID) is family shared")
+}
+```
+
+---
+
+## Consumables
+
+Use `ConsumableManager` for credits, hearts, tip-jar purchases, or anything that can be bought multiple times.
+
+```swift
+@State private var consumableManager = ConsumableManager<AppProduct>()
+
+// Set the delivery handler before any purchase can occur.
+// This is called with a verified transaction before it is finished.
+consumableManager.onDeliver = { transaction in
+    switch AppProduct(rawValue: transaction.productID) {
+    case .credits100: await creditsStore.add(100)
+    case .credits500: await creditsStore.add(500)
+    default: break
+    }
+}
+
+// Load products
+await consumableManager.fetchProducts()
+
+// Purchase
+let outcome = await consumableManager.purchase(product)
+```
+
+The handler is guaranteed to be called before `transaction.finish()`. If the app crashes between purchase and delivery, the transaction re-delivers on the next launch.
+
+---
+
+## Conflict Detection
+
+Use `StoreConfig` to declare which tiers or products should never coexist. `StoreManager.hasConflictingPlans` reports whether the current user state violates any rule — useful for support diagnostics or admin tooling.
+
+```swift
+let config = StoreConfig<AppTier, AppProduct>(
+    conflictGroups: [.pro: [.basic]],        // pro and basic subscriptions simultaneously
+    conflictProducts: [.proYearly: [.proMonthly]]  // both billing periods
+)
+
+if store.hasConflictingPlans {
+    // Prompt user to contact support
+}
+```
+
+You can also call `config.hasConflicts(activeTiers:ownedProducts:)` directly in your own code or tests, without needing a store instance.
+
+---
+
+## Transaction History
+
+```swift
+// Full history (for a "Purchases" screen or refund support)
+let transactions = await store.allTransactions()
+
+// Most recent transaction for a specific product
+if let tx = await store.latestTransaction(for: "com.app.pro.monthly") {
+    // Pass tx.id to Apple's refund request API if needed
+}
+```
+
+---
+
+## SwiftUI Sheet Helpers
+
+`StoreManager` exposes two booleans that wire directly to SwiftUI's subscription management modifiers:
+
+```swift
+Button("Manage Subscription") {
+    store.showManageSubscriptionsSheet = true
+}
+.manageSubscriptionsSheet(isPresented: Binding(
+    get: { store.showManageSubscriptionsSheet },
+    set: { store.showManageSubscriptionsSheet = $0 }
+))
+
+Button("Redeem Offer Code") {
+    store.showOfferCodeRedemption = true
+}
+.offerCodeRedemption(isPresented: Binding(
+    get: { store.showOfferCodeRedemption },
+    set: { store.showOfferCodeRedemption = $0 }
+))
+```
+
+---
+
+## Protocols
+
+Implement these to integrate SKManager with your app's product/tier model:
+
+| Protocol | Required members |
+| --- | --- |
+| `StoreProductRepresentable` | `rawValue: String`, `sortOrder`, `productType`, `groupedByTier`, `Tier` |
+| `ProductTierRepresentable` | `displayName`, `description`, `tierLevel: Int` |
+| `TierCapabilities` | `capabilities`, `isAccessible(_:)` |
+| `EntitlementProvider` | Implement a custom entitlement backend instead of `EntitlementManager` |
+
+---
+
 ## Contributing
 
-Pull requests for new features, improvements, and documentation are welcome.
+Pull requests for bug fixes, improvements, and documentation are welcome.
 
 ## License
 
