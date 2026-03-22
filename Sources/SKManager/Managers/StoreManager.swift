@@ -81,6 +81,12 @@ public final class StoreManager<
     /// The most recent error encountered during entitlement or transaction operations.
     public private(set) var lastError: Error?
 
+    /// Called with the verified transaction immediately after a successful purchase completes.
+    ///
+    /// Use this to wire in analytics or any other post-purchase side effects without creating
+    /// a dependency on a specific analytics library inside this package.
+    public var onPurchaseCompleted: ((Transaction) -> Void)?
+
     // MARK: - Initialization
 
     /// Creates a new store manager configured with an entitlement provider and optional store
@@ -200,6 +206,7 @@ extension StoreManager {
             switch result {
                 case let .success(.verified(transaction)):
                     await transaction.finish()
+                    onPurchaseCompleted?(transaction)
                     await entitlementManager.refreshEntitlements()
                     syncPurchaseStates()
                     return .success
