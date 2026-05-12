@@ -19,27 +19,33 @@ import Foundation
 @MainActor
 public protocol EntitlementProvider: AnyObject {
 
-    /// The type representing available store products.
-    associatedtype Item: StoreProductRepresentable
+  /// The type representing available store products.
+  associatedtype Item: StoreProductRepresentable
 
-    /// The type representing product tiers or subscription levels.
-    associatedtype Group: ProductTierRepresentable
+  /// The type representing product tiers or subscription levels.
+  associatedtype Group: ProductTierRepresentable
 
-    /// The set of all product identifiers that have been purchased by the user.
-    var purchasedProductIDs: Set<String> { get }
+  /// The set of all product identifiers that have been purchased by the user.
+  var purchasedProductIDs: Set<String> { get }
 
-    /// The list of lifetime entitlements owned by the user.
-    var lifetimeEntitlements: [LifetimeEntitlement<Group>] { get }
+  /// The list of lifetime entitlements owned by the user.
+  var lifetimeEntitlements: [LifetimeEntitlement<Group>] { get }
 
-    /// The user’s currently active subscription entitlement, if any.
-    var activeSubscription: SubscriptionEntitlement<Group>? { get }
+  /// The user’s currently active subscription entitlement, if any.
+  var activeSubscription: SubscriptionEntitlement<Group>? { get }
 
-    /// A closure that is called whenever entitlement data is refreshed.
-    var onRefresh: (() -> Void)? { get set }
+  /// A closure that is called whenever entitlement data is refreshed.
+  var onRefresh: (() -> Void)? { get set }
 
-    /// Refreshes the user’s entitlements by validating current App Store transactions.
-    ///
-    /// This method should update all entitlement-related properties and trigger the `onRefresh`
-    /// callback upon completion.
-    func refreshEntitlements() async
+  /// Refreshes the user’s entitlements by validating current App Store transactions.
+  ///
+  /// This method should update all entitlement-related properties and trigger the `onRefresh`
+  /// callback upon completion.
+  func refreshEntitlements() async
+
+  /// Refreshes entitlements immediately, bypassing the cooldown guard.
+  ///
+  /// Use this after a confirmed purchase or restore where the result must be reflected in the
+  /// UI without delay. Unlike `refreshEntitlements()`, this call is never throttled.
+  func forceRefreshEntitlements() async
 }

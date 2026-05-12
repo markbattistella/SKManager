@@ -173,7 +173,7 @@ extension EntitlementManager {
 
         await transaction.finish()
         Task { @MainActor in
-          await self.refreshEntitlements()
+          await self.forceRefreshEntitlements()
         }
       }
     }
@@ -229,6 +229,16 @@ extension EntitlementManager {
       return
     }
     lastRefreshTime = now
+    await _performRefresh()
+  }
+
+  /// Refreshes entitlements immediately, bypassing the cooldown guard.
+  ///
+  /// Use this after a confirmed purchase or restore event where the result must be reflected
+  /// in the UI without delay. Resets the cooldown timer so subsequent calls are also permitted.
+  public func forceRefreshEntitlements() async {
+    guard !isRefreshing else { return }
+    lastRefreshTime = .distantPast
     await _performRefresh()
   }
 
