@@ -5,6 +5,7 @@
 //
 
 import Foundation
+import StoreKit
 
 /// A protocol that defines the interface for objects that provide information about the user’s
 /// current App Store entitlements, including subscriptions and lifetime purchases.
@@ -43,9 +44,25 @@ public protocol EntitlementProvider: AnyObject {
   /// callback upon completion.
   func refreshEntitlements() async
 
-  /// Refreshes entitlements immediately, bypassing the cooldown guard.
+  /// Reconciles entitlements immediately, bypassing the cooldown guard.
   ///
-  /// Use this after a confirmed purchase or restore where the result must be reflected in the
-  /// UI without delay. Unlike `refreshEntitlements()`, this call is never throttled.
+  /// Use this for startup, restore, manual refresh, and scheduled expiry checks where there may
+  /// not be a live StoreKit update event to consume. Listener and purchase-result paths should
+  /// normally apply their verified transaction directly instead.
   func forceRefreshEntitlements() async
+
+  /// Applies a verified StoreKit transaction directly to local entitlement state.
+  ///
+  /// Use this immediately after `Product.purchase()` returns a verified transaction, before
+  /// relying on StoreKit's entitlement sequences to catch up.
+  func recordVerifiedTransaction(_ transaction: Transaction) async
+}
+
+extension EntitlementProvider {
+
+  /// Default implementation for custom entitlement providers.
+  ///
+  /// Concrete StoreKit-backed providers can override this to apply a freshly verified transaction
+  /// immediately. The default keeps existing conformers source-compatible.
+  public func recordVerifiedTransaction(_ transaction: Transaction) async {}
 }

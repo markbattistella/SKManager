@@ -128,9 +128,14 @@ extension StoreManager {
 
   /// Refreshes all store data including product listings and entitlement states.
   public func refreshAll() async {
-    await fetchProducts()
-    await entitlementManager.forceRefreshEntitlements()
+    await refreshProducts()
+    await entitlementManager.refreshEntitlements()
     syncPurchaseStates()
+  }
+
+  /// Refreshes StoreKit product metadata without touching entitlement state.
+  public func refreshProducts() async {
+    await fetchProducts()
   }
 
   /// Fetches product metadata from the App Store for all available product identifiers.
@@ -188,8 +193,8 @@ extension StoreManager {
   ///   an empty set.
   /// - Returns: A `PurchaseOutcome` value describing the result of the attempted purchase.
   ///
-  /// - Note: A `.success` result indicates that the transaction completed successfully and was
-  /// verified, but entitlement propagation may still complete asynchronously.
+  /// - Note: A `.success` result indicates that the transaction completed successfully, was
+  /// verified, and was applied to the entitlement manager.
   public func purchase(
     _ product: Product,
     options: Set<Product.PurchaseOption> = []
@@ -206,9 +211,9 @@ extension StoreManager {
 
       switch result {
       case .success(.verified(let transaction)):
-        await transaction.finish()
+        await entitlementManager.recordVerifiedTransaction(transaction)
         onPurchaseCompleted?(transaction)
-        await entitlementManager.forceRefreshEntitlements()
+        await transaction.finish()
         syncPurchaseStates()
         return .success
 
@@ -239,7 +244,9 @@ extension StoreManager {
   /// Restores all previously purchased products and subscriptions from the App Store.
   public func restorePurchases() async {
     try? await AppStore.sync()
-    await refreshAll()
+    await refreshProducts()
+    await entitlementManager.forceRefreshEntitlements()
+    syncPurchaseStates()
   }
 }
 

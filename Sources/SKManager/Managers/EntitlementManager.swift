@@ -33,6 +33,14 @@ public final class EntitlementManager<
   @ObservationIgnored
   private var updatesTask: Task<Void, Never>?
 
+  /// The asynchronous task that listens for StoreKit subscription status updates.
+  @ObservationIgnored
+  private var subscriptionStatusTask: Task<Void, Never>?
+
+  /// The initial entitlement refresh task.
+  @ObservationIgnored
+  private var bootstrapTask: Task<Void, Never>?
+
   /// The scheduled task that refreshes entitlements when a subscription expires.
   @ObservationIgnored
   private var expiryTask: Task<Void, Never>?
@@ -40,6 +48,18 @@ public final class EntitlementManager<
   /// Prevents `_performRefresh()` from overlapping with itself.
   @ObservationIgnored
   private var isRefreshing = false
+
+  /// Tracks whether the first entitlement snapshot has been published to observers.
+  @ObservationIgnored
+  private var hasPublishedEntitlementSnapshot = false
+
+  /// Records that a forced refresh was requested while another refresh was already running.
+  @ObservationIgnored
+  private var needsRefreshAfterCurrent = false
+
+  /// Continuations waiting for a forced refresh requested during an active refresh.
+  @ObservationIgnored
+  private var refreshWaiters: [CheckedContinuation<Void, Never>] = []
 
   @ObservationIgnored
   private var lastRefreshTime = Date.distantPast
@@ -49,6 +69,22 @@ public final class EntitlementManager<
 
   @ObservationIgnored
   private let appLaunchTime = Date.now
+
+  /// The most recent subscription status observed from StoreKit.
+  @ObservationIgnored
+  private var latestSubscriptionStatusState: Product.SubscriptionInfo.RenewalState?
+
+  /// The time the latest subscription status was observed.
+  @ObservationIgnored
+  private var latestSubscriptionStatusUpdatedAt = Date.distantPast
+
+  /// How long a subscription status update should be trusted when resolving empty snapshots.
+  @ObservationIgnored
+  private let subscriptionStatusFreshness: TimeInterval = 300
+
+  /// Short allowance for StoreKit entitlement sequences to settle around compressed renewals.
+  @ObservationIgnored
+  private let renewalSettlementInterval: TimeInterval = 10
 
   /// The configuration describing the app's capability rules and tier mappings.
   @ObservationIgnored
@@ -75,10 +111,10 @@ public final class EntitlementManager<
   /// The most recent error encountered during entitlement or transaction operations.
   public private(set) var lastError: Error?
 
-  /// Incremented after every completed entitlement refresh.
+  /// Incremented after the first resolved entitlement snapshot and each later state change.
   ///
   /// Reading this property from a SwiftUI view body registers it as an observation dependency,
-  /// guaranteeing a re-render after any purchase or restore — including cases where SwiftUI
+  /// guaranteeing a re-render after entitlement changes — including cases where SwiftUI
   /// doesn't reliably track the underlying `activeSubscription`/`lifetimeEntitlements` chain.
   public private(set) var refreshCount: Int = 0
 
@@ -113,30 +149,43 @@ public final class EntitlementManager<
     self.activeSubscription = nil
     self.lifetimeEntitlements = []
 
-    let (stream, continuation) = AsyncStream<Void>.makeStream()
+    let (stream, continuation) = AsyncStream<Void>.makeStream(
+      bufferingPolicy: .bufferingNewest(1)
+    )
     self.entitlementUpdates = stream
     self.entitlementContinuation = continuation
 
     // Start observing transactions early, but asynchronously.
     self.startObservingTransactions()
+    self.startObservingSubscriptionStatuses()
 
     // Perform initial entitlement refresh once StoreKit is ready.
-    Task { @MainActor in
-      await self.bootstrapEntitlements()
+    self.bootstrapTask = Task { @MainActor [weak self] in
+      await self?.bootstrapEntitlements()
     }
   }
 
   /// - Warning: Temporary workaround for a Swift 6.2 compiler issue where `deinit` containing
   /// task cancellation causes build or archive failures. This method manually cancels the
-  /// background StoreKit observation and expiry tasks (`updatesTask` and `expiryTask`) and
-  /// should be called explicitly when tearing down the `EntitlementManager`. Remove this method
-  /// and restore the standard `deinit` cleanup once the compiler bug is resolved.
+  /// background StoreKit observation, bootstrap, and expiry tasks and should be called explicitly
+  /// when tearing down the `EntitlementManager`. Remove this method and restore the standard
+  /// `deinit` cleanup once the compiler bug is resolved.
   public func invalidate() {
     logger.info("EntitlementManager invalidated")
+    bootstrapTask?.cancel()
     updatesTask?.cancel()
+    subscriptionStatusTask?.cancel()
     expiryTask?.cancel()
+    bootstrapTask = nil
     updatesTask = nil
+    subscriptionStatusTask = nil
     expiryTask = nil
+    needsRefreshAfterCurrent = false
+    let waiters = refreshWaiters
+    refreshWaiters.removeAll()
+    for waiter in waiters {
+      waiter.resume()
+    }
     entitlementContinuation?.finish()
     entitlementContinuation = nil
   }
@@ -171,11 +220,64 @@ extension EntitlementManager {
           continue
         }
 
+        await self.recordVerifiedTransaction(transaction)
         await transaction.finish()
-        Task { @MainActor in
-          await self.forceRefreshEntitlements()
-        }
       }
+    }
+  }
+
+  /// Begins observing StoreKit subscription status changes.
+  ///
+  /// Subscription expiry, revocation, billing retry, and transaction-manager edits in local
+  /// StoreKit testing can arrive as status changes rather than transaction updates. Observing this
+  /// stream keeps entitlement state current without relying on the user navigating away and back.
+  private func startObservingSubscriptionStatuses() {
+    subscriptionStatusTask?.cancel()
+    subscriptionStatusTask = Task.detached(priority: .background) { [weak self] in
+      guard let self else { return }
+
+      for await status in Product.SubscriptionInfo.Status.updates {
+        await self.handleSubscriptionStatusUpdate(status)
+      }
+    }
+  }
+
+  private func handleSubscriptionStatusUpdate(_ status: Product.SubscriptionInfo.Status) async {
+    latestSubscriptionStatusState = status.state
+    latestSubscriptionStatusUpdatedAt = Date.now
+
+    logger.info("Subscription status update received: \(self.description(for: status.state))")
+
+    switch status.transaction {
+    case .verified(let transaction):
+      if status.state == .expired || status.state == .revoked {
+        clearEntitlement(for: transaction.productID, reason: self.description(for: status.state))
+      } else {
+        await recordVerifiedTransaction(transaction)
+      }
+      await transaction.finish()
+
+    case .unverified(let transaction, let error):
+      logger.warning(
+        "Unverified subscription status transaction: \(transaction.productID), error: \(error)")
+      lastError = error
+    }
+  }
+
+  private func description(for state: Product.SubscriptionInfo.RenewalState) -> String {
+    switch state {
+    case .subscribed:
+      "subscribed"
+    case .expired:
+      "expired"
+    case .inBillingRetryPeriod:
+      "inBillingRetryPeriod"
+    case .inGracePeriod:
+      "inGracePeriod"
+    case .revoked:
+      "revoked"
+    default:
+      "unknown(\(state.rawValue))"
     }
   }
 }
@@ -186,8 +288,8 @@ extension EntitlementManager {
 
   /// Attempts to load entitlements with retries to avoid StoreKit race conditions on launch.
   ///
-  /// Calls `_performRefresh()` directly, bypassing the cooldown guard, so that all retry
-  /// attempts execute regardless of how quickly they are scheduled.
+  /// Calls `performRefresh(force:)`, bypassing the cooldown guard, so that all retry attempts
+  /// execute regardless of how quickly they are scheduled while still serialising refresh work.
   ///
   /// - Performs up to 5 attempts spaced 2 seconds apart.
   /// - Exits early if a valid entitlement is found.
@@ -196,7 +298,8 @@ extension EntitlementManager {
     let retryDelay: UInt64 = 2_000_000_000  // 2 seconds
 
     for attempt in 1...maxAttempts {
-      await _performRefresh()
+      guard !Task.isCancelled else { return }
+      await performRefresh(force: true)
 
       if activeSubscription != nil || !lifetimeEntitlements.isEmpty {
         logger.info("Bootstrap succeeded on attempt \(attempt)")
@@ -204,7 +307,11 @@ extension EntitlementManager {
       }
 
       logger.info("Bootstrap attempt \(attempt) found no entitlements, retrying…")
-      try? await Task.sleep(nanoseconds: retryDelay)
+      do {
+        try await Task.sleep(nanoseconds: retryDelay)
+      } catch {
+        return
+      }
     }
 
     logger.warning("Bootstrap completed with no entitlements after \(maxAttempts) attempts")
@@ -217,8 +324,8 @@ extension EntitlementManager {
 
   /// Refreshes all entitlements by scanning verified StoreKit transactions.
   ///
-  /// Applies a cooldown to prevent rapid successive refreshes. For forced refreshes without
-  /// the cooldown (e.g. during bootstrap), use `_performRefresh()` directly.
+  /// Applies a cooldown to prevent rapid successive refreshes. For reconciliation without the
+  /// cooldown, use `forceRefreshEntitlements()`.
   ///
   /// - Note: This method should be called at launch and when the app becomes active.
   public func refreshEntitlements() async {
@@ -229,17 +336,110 @@ extension EntitlementManager {
       return
     }
     lastRefreshTime = now
-    await _performRefresh()
+    await performRefresh()
   }
 
-  /// Refreshes entitlements immediately, bypassing the cooldown guard.
+  /// Reconciles entitlements immediately, bypassing the cooldown guard.
   ///
-  /// Use this after a confirmed purchase or restore event where the result must be reflected
-  /// in the UI without delay. Resets the cooldown timer so subsequent calls are also permitted.
+  /// Use this for startup, restore, manual refresh, and scheduled expiry checks where the manager
+  /// needs an authoritative StoreKit snapshot rather than a single live update event.
   public func forceRefreshEntitlements() async {
-    guard !isRefreshing else { return }
     lastRefreshTime = .distantPast
-    await _performRefresh()
+    await performRefresh(force: true)
+  }
+
+  /// Applies a known verified transaction immediately to entitlement state.
+  ///
+  /// StoreKit can lag before a freshly purchased transaction appears in
+  /// `Transaction.currentEntitlements`, especially in local StoreKit testing. Applying the verified
+  /// purchase result directly prevents the UI from staying in a stale "not purchased" state.
+  public func recordVerifiedTransaction(_ transaction: Transaction) async {
+    guard transaction.productType != .consumable else {
+      logger.info("Ignoring consumable transaction \(transaction.productID) for entitlements")
+      return
+    }
+
+    guard await isUsableEntitlement(transaction) else {
+      logger.debug("Ignoring inactive transaction \(transaction.productID) for entitlements")
+      return
+    }
+
+    var activeSub = activeSubscription
+    var lifetimes = lifetimeEntitlements.filter { $0.productID != transaction.productID }
+
+    guard
+      await handleTransaction(
+        transaction,
+        activeSub: &activeSub,
+        lifetimes: &lifetimes
+      )
+    else {
+      logger.warning(
+        "Verified transaction has no matching product mapping: \(transaction.productID)")
+      return
+    }
+
+    guard subscriptionGrantsAccess(activeSub) || !lifetimes.isEmpty else {
+      logger.info(
+        "Skipping verified transaction \(transaction.productID) because it no longer grants access"
+      )
+      return
+    }
+
+    let activeIDs = productIDs(for: activeSub, lifetimes: lifetimes)
+    guard
+      !entitlementStateMatches(
+        activeSub: activeSub,
+        lifetimes: lifetimes,
+        purchasedIDs: activeIDs
+      )
+    else {
+      logger.debug(
+        "Ignoring duplicate verified transaction \(transaction.id) for \(transaction.productID)")
+      return
+    }
+
+    activeSubscription = activeSub
+    lifetimeEntitlements = lifetimes
+    purchasedProductIDs = activeIDs
+
+    expiryTask?.cancel()
+    if let expiry = activeSub?.expirationDate {
+      scheduleExpiryRefresh(at: expiry)
+    }
+
+    publishEntitlementRefresh()
+    logger.info(
+      "Recorded verified transaction \(transaction.productID). Active tier: \(String(localized: self.activeTier?.displayName ?? "none")) | Expiry: \(self.activeSubscription?.expirationDate?.ISO8601Format() ?? "none")"
+    )
+  }
+
+  /// Runs entitlement refresh work serially.
+  ///
+  /// Forced refreshes requested during an existing refresh are not dropped. They are queued as one
+  /// follow-up pass, and callers wait until that pass has completed.
+  private func performRefresh(force: Bool = false) async {
+    if isRefreshing {
+      guard force else { return }
+      needsRefreshAfterCurrent = true
+      await withCheckedContinuation { continuation in
+        refreshWaiters.append(continuation)
+      }
+      return
+    }
+
+    isRefreshing = true
+    repeat {
+      needsRefreshAfterCurrent = false
+      await _performRefresh()
+    } while needsRefreshAfterCurrent
+    isRefreshing = false
+
+    let waiters = refreshWaiters
+    refreshWaiters.removeAll()
+    for waiter in waiters {
+      waiter.resume()
+    }
   }
 
   /// Performs the actual entitlement refresh without cooldown or reentrancy guards.
@@ -248,9 +448,6 @@ extension EntitlementManager {
   /// Notifies both the `onRefresh` callback and the `entitlementUpdates` stream when complete,
   /// and posts `.entitlementsDidRefresh`.
   private func _performRefresh() async {
-    isRefreshing = true
-    defer { isRefreshing = false }
-
     var activeSub: SubscriptionEntitlement<Group>?
     var lifetimes: [LifetimeEntitlement<Group>] = []
     var activeIDs: Set<String> = []
@@ -270,8 +467,25 @@ extension EntitlementManager {
         }
         continue
       }
-      activeIDs.insert(t.productID)
-      await handleTransaction(t, activeSub: &activeSub, lifetimes: &lifetimes)
+      guard await isUsableEntitlement(t) else {
+        logger.debug(
+          "Ignoring inactive current entitlement \(t.productID). Expiry: \(t.expirationDate?.ISO8601Format() ?? "none")"
+        )
+        continue
+      }
+      if await handleTransaction(t, activeSub: &activeSub, lifetimes: &lifetimes) {
+        activeIDs.insert(t.productID)
+      } else {
+        logger.warning("Verified transaction has no matching product mapping: \(t.productID)")
+      }
+    }
+
+    if activeIDs.isEmpty {
+      await loadLatestTransactions(
+        activeIDs: &activeIDs,
+        activeSub: &activeSub,
+        lifetimes: &lifetimes
+      )
     }
 
     // Guard against StoreKit returning an empty response during early boot.
@@ -279,6 +493,12 @@ extension EntitlementManager {
     let noCurrentEntitlements = activeSub == nil && lifetimes.isEmpty
 
     if noCurrentEntitlements && hasPreviousEntitlements {
+      if shouldRetainCurrentEntitlementsDuringEmptyRefresh() {
+        logger.info(
+          "Refresh ignored (empty StoreKit response while local subscription remains active)")
+        return
+      }
+
       let bootElapsed = Date.now.timeIntervalSince(appLaunchTime)
       if bootElapsed < 10 {
         logger.info("Refresh ignored (early boot empty response)")
@@ -287,6 +507,12 @@ extension EntitlementManager {
         logger.info("Entitlements cleared (user likely unsubscribed or expired)")
       }
     }
+
+    let didChange = !entitlementStateMatches(
+      activeSub: activeSub,
+      lifetimes: lifetimes,
+      purchasedIDs: activeIDs
+    )
 
     activeSubscription = activeSub
     lifetimeEntitlements = lifetimes
@@ -297,19 +523,261 @@ extension EntitlementManager {
       scheduleExpiryRefresh(at: expiry)
     }
 
+    if didChange || !hasPublishedEntitlementSnapshot {
+      publishEntitlementRefresh()
+      logger.info(
+        "Entitlement refresh complete. Active tier: \(String(localized: self.activeTier?.displayName ?? "none")) | Expiry: \(self.activeSubscription?.expirationDate?.ISO8601Format() ?? "none")"
+      )
+    } else {
+      logger.debug(
+        "Entitlement refresh unchanged. Active tier: \(String(localized: self.activeTier?.displayName ?? "none")) | Expiry: \(self.activeSubscription?.expirationDate?.ISO8601Format() ?? "none")"
+      )
+    }
+  }
+
+  /// Falls back to latest transactions when `currentEntitlements` does not return anything.
+  ///
+  /// This keeps local StoreKit testing and transaction-manager edits from looking like "no
+  /// purchase" immediately after a verified purchase has completed.
+  private func loadLatestTransactions(
+    activeIDs: inout Set<String>,
+    activeSub: inout SubscriptionEntitlement<Group>?,
+    lifetimes: inout [LifetimeEntitlement<Group>]
+  ) async {
+    logger.debug("No current entitlements found; checking latest transactions")
+
+    for item in Item.allCases {
+      guard let result = await Transaction.latest(for: item.rawValue),
+        case .verified(let transaction) = result
+      else {
+        continue
+      }
+
+      guard await isUsableEntitlement(transaction) else {
+        continue
+      }
+
+      if await handleTransaction(
+        transaction,
+        activeSub: &activeSub,
+        lifetimes: &lifetimes
+      ) {
+        activeIDs.insert(transaction.productID)
+      } else {
+        logger.warning(
+          "Latest transaction has no matching product mapping: \(transaction.productID)")
+      }
+    }
+  }
+
+  /// Returns whether a transaction should currently grant entitlement access.
+  private func isUsableEntitlement(_ transaction: Transaction) async -> Bool {
+    let now = Date.now
+
+    if let revoked = transaction.revocationDate, revoked <= now { return false }
+
+    switch transaction.productType {
+    case .autoRenewable, .nonRenewable:
+      if let status = await transaction.subscriptionStatus {
+        if status.state == .expired || status.state == .revoked {
+          return false
+        }
+
+        if status.state == .subscribed || status.state == .inGracePeriod {
+          guard let expiry = transaction.expirationDate else { return true }
+          return expiry > now
+        }
+
+        if status.state == .inBillingRetryPeriod {
+          guard let expiry = transaction.expirationDate else { return false }
+          return expiry > now
+        }
+
+        return false
+      }
+
+      guard let expiry = transaction.expirationDate else { return true }
+      return expiry > now
+
+    case .nonConsumable:
+      return true
+
+    case .consumable:
+      return false
+
+    default:
+      return false
+    }
+  }
+
+  /// Returns whether a subscription entitlement should continue granting access locally.
+  private func subscriptionGrantsAccess(_ subscription: SubscriptionEntitlement<Group>?) -> Bool {
+    guard let subscription else { return false }
+    guard let expiry = subscription.expirationDate else { return true }
+    return expiry > Date.now
+  }
+
+  /// Returns whether an empty StoreKit snapshot is likely an entitlement propagation gap.
+  private func shouldRetainCurrentEntitlementsDuringEmptyRefresh() -> Bool {
+    guard let subscription = activeSubscription else { return false }
+
+    if hasFreshSubscriptionStatus(where: { state in
+      state == .expired || state == .revoked
+    }) {
+      return false
+    }
+
+    if subscriptionGrantsAccess(subscription) {
+      return true
+    }
+
+    guard let expiry = subscription.expirationDate else { return true }
+    let expiredAgo = Date.now.timeIntervalSince(expiry)
+
+    return expiredAgo >= 0
+      && expiredAgo < renewalSettlementInterval
+      && hasFreshSubscriptionStatus(where: { state in
+        state == .subscribed || state == .inGracePeriod
+      })
+  }
+
+  /// Returns whether the latest StoreKit status is fresh and matches a predicate.
+  private func hasFreshSubscriptionStatus(
+    where matches: (Product.SubscriptionInfo.RenewalState) -> Bool
+  ) -> Bool {
+    guard let latestSubscriptionStatusState else { return false }
+    guard
+      Date.now.timeIntervalSince(latestSubscriptionStatusUpdatedAt) < subscriptionStatusFreshness
+    else {
+      return false
+    }
+    return matches(latestSubscriptionStatusState)
+  }
+
+  /// Removes an entitlement immediately when StoreKit explicitly reports a terminal status.
+  private func clearEntitlement(for productID: String, reason: String) {
+    let removedPurchasedID = purchasedProductIDs.remove(productID) != nil
+    let removedActiveSubscription = activeSubscription?.productID == productID
+    let lifetimeCount = lifetimeEntitlements.count
+
+    lifetimeEntitlements.removeAll { $0.productID == productID }
+    if removedActiveSubscription {
+      activeSubscription = nil
+      expiryTask?.cancel()
+      expiryTask = nil
+    }
+
+    let removedLifetime = lifetimeEntitlements.count != lifetimeCount
+    guard removedPurchasedID || removedActiveSubscription || removedLifetime else { return }
+
+    publishEntitlementRefresh()
+    logger.info("Cleared entitlement \(productID) after subscription status: \(reason)")
+  }
+
+  /// Notifies observers that entitlement state changed.
+  private func publishEntitlementRefresh() {
+    hasPublishedEntitlementSnapshot = true
     refreshCount &+= 1
     onRefresh?()
     entitlementContinuation?.yield()
-
-    logger.info(
-      "Entitlement refresh complete. Active tier: \(String(localized: self.activeTier?.displayName ?? "none")) | Expiry: \(self.activeSubscription?.expirationDate?.ISO8601Format() ?? "none")"
-    )
 
     NotificationCenter.default.post(
       name: .entitlementsDidRefresh,
       object: self,
       userInfo: ["entitlements": "refreshed"]
     )
+  }
+
+  /// Returns `true` when a candidate entitlement snapshot matches the current local state.
+  private func entitlementStateMatches(
+    activeSub: SubscriptionEntitlement<Group>?,
+    lifetimes: [LifetimeEntitlement<Group>],
+    purchasedIDs: Set<String>
+  ) -> Bool {
+    purchasedProductIDs == purchasedIDs
+      && subscriptionsAreEqual(activeSubscription, activeSub)
+      && lifetimeEntitlementsAreEqual(lifetimeEntitlements, lifetimes)
+  }
+
+  private func productIDs(
+    for activeSub: SubscriptionEntitlement<Group>?,
+    lifetimes: [LifetimeEntitlement<Group>]
+  ) -> Set<String> {
+    var ids = Set(lifetimes.map(\.productID))
+    if let activeSub, subscriptionGrantsAccess(activeSub) {
+      ids.insert(activeSub.productID)
+    }
+    return ids
+  }
+
+  private func subscriptionsAreEqual(
+    _ lhs: SubscriptionEntitlement<Group>?,
+    _ rhs: SubscriptionEntitlement<Group>?
+  ) -> Bool {
+    switch (lhs, rhs) {
+    case (.none, .none):
+      return true
+
+    case (.some(let lhs), .some(let rhs)):
+      return lhs.productID == rhs.productID
+        && lhs.tier == rhs.tier
+        && lhs.expirationDate == rhs.expirationDate
+        && lhs.ownershipType == rhs.ownershipType
+        && renewalActionsAreEqual(lhs.renewalAction, rhs.renewalAction)
+
+    default:
+      return false
+    }
+  }
+
+  private func renewalActionsAreEqual(
+    _ lhs: SubscriptionEntitlement<Group>.RenewalAction?,
+    _ rhs: SubscriptionEntitlement<Group>.RenewalAction?
+  ) -> Bool {
+    switch (lhs, rhs) {
+    case (.none, .none):
+      return true
+
+    case (.some(.renewSame(let lhsPlan, let lhsDate)), .some(.renewSame(let rhsPlan, let rhsDate))):
+      return lhsPlan == rhsPlan && lhsDate == rhsDate
+
+    case (
+      .some(.upgrade(let lhsTier, let lhsID, let lhsDate)),
+      .some(.upgrade(let rhsTier, let rhsID, let rhsDate))
+    ):
+      return lhsTier == rhsTier && lhsID == rhsID && lhsDate == rhsDate
+
+    case (
+      .some(.downgrade(let lhsTier, let lhsID, let lhsDate)),
+      .some(.downgrade(let rhsTier, let rhsID, let rhsDate))
+    ):
+      return lhsTier == rhsTier && lhsID == rhsID && lhsDate == rhsDate
+
+    case (.some(.crossgrade(let lhsID, let lhsDate)), .some(.crossgrade(let rhsID, let rhsDate))):
+      return lhsID == rhsID && lhsDate == rhsDate
+
+    case (.some(.cancel(let lhsDate)), .some(.cancel(let rhsDate))):
+      return lhsDate == rhsDate
+
+    default:
+      return false
+    }
+  }
+
+  private func lifetimeEntitlementsAreEqual(
+    _ lhs: [LifetimeEntitlement<Group>],
+    _ rhs: [LifetimeEntitlement<Group>]
+  ) -> Bool {
+    guard lhs.count == rhs.count else { return false }
+
+    let lhsSorted = lhs.sorted { $0.productID < $1.productID }
+    let rhsSorted = rhs.sorted { $0.productID < $1.productID }
+
+    return zip(lhsSorted, rhsSorted).allSatisfy { lhs, rhs in
+      lhs.productID == rhs.productID
+        && lhs.tier == rhs.tier
+        && lhs.ownershipType == rhs.ownershipType
+    }
   }
 
   /// Processes a verified StoreKit transaction and updates local entitlement state.
@@ -327,15 +795,16 @@ extension EntitlementManager {
   ///   transaction represents a non-consumable (lifetime) product.
   ///
   /// - Note: Consumable transactions are logged but do not affect entitlement state.
+  @discardableResult
   private func handleTransaction(
     _ transaction: Transaction,
     activeSub: inout SubscriptionEntitlement<Group>?,
     lifetimes: inout [LifetimeEntitlement<Group>]
-  ) async {
+  ) async -> Bool {
     guard
       let group = Item.groupedByTier
         .first(where: { $0.value.contains(where: { $0.rawValue == transaction.productID }) })?.key
-    else { return }
+    else { return false }
 
     switch transaction.productType {
     case .autoRenewable, .nonRenewable:
@@ -360,6 +829,8 @@ extension EntitlementManager {
     default:
       break
     }
+
+    return true
   }
 }
 
@@ -471,16 +942,30 @@ extension EntitlementManager {
     expiryTask?.cancel()
     let delay = date.timeIntervalSinceNow
     guard delay > 0 else {
-      expiryTask = Task { @MainActor in await self.refreshEntitlements() }
+      expiryTask = Task { [weak self] in
+        await self?.refreshIfSubscriptionStillExpires(at: date)
+      }
       return
     }
     expiryTask = Task(priority: .background) { [weak self] in
-      guard let self else { return }
       try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-      Task { @MainActor in
-        await self.refreshEntitlements()
-      }
+      guard !Task.isCancelled else { return }
+      await self?.refreshIfSubscriptionStillExpires(at: date)
     }
+  }
+
+  /// Refreshes only if the scheduled expiry still matches the current local subscription.
+  private func refreshIfSubscriptionStillExpires(at scheduledExpirationDate: Date) async {
+    if let currentExpiry = activeSubscription?.expirationDate,
+      currentExpiry > scheduledExpirationDate.addingTimeInterval(0.5)
+    {
+      logger.debug(
+        "Skipping stale expiry refresh scheduled for \(scheduledExpirationDate.ISO8601Format()); current expiry is \(currentExpiry.ISO8601Format())"
+      )
+      return
+    }
+
+    await forceRefreshEntitlements()
   }
 }
 
