@@ -38,6 +38,12 @@ public protocol EntitlementProvider: AnyObject {
   /// A closure that is called whenever entitlement data is refreshed.
   var onRefresh: (() -> Void)? { get set }
 
+  /// An async stream that emits a value whenever entitlements are refreshed.
+  ///
+  /// Prefer this over `onRefresh` when multiple consumers need to react to entitlement changes,
+  /// since it does not overwrite a single shared closure.
+  var entitlementUpdates: AsyncStream<Void> { get }
+
   /// Refreshes the user’s entitlements by validating current App Store transactions.
   ///
   /// This method should update all entitlement-related properties and trigger the `onRefresh`

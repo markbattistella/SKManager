@@ -160,16 +160,13 @@ let rules = StoreRules<AppProduct>(
 @main
 struct MyApp: App {
 
-    @State private var entitlementManager = EntitlementManager<AppProduct, AppTier, AppCapabilities>(
-        config: AppCapabilities(),
-        defaultTier: nil  // nil = unauthenticated/free state
-    )
-
+    @State private var entitlementManager: EntitlementManager<AppProduct, AppTier, AppCapabilities>
     @State private var storeManager: MyStoreManager
 
     init() {
         let em = EntitlementManager<AppProduct, AppTier, AppCapabilities>(
-            config: AppCapabilities()
+            config: AppCapabilities(),
+            defaultTier: nil  // nil = unauthenticated/free state
         )
         _entitlementManager = State(initialValue: em)
         _storeManager = State(initialValue: MyStoreManager(
@@ -193,8 +190,9 @@ struct MyApp: App {
 final class MyStoreManager: StoreManager<AppProduct, AppTier, EntitlementManager<AppProduct, AppTier, AppCapabilities>> {}
 ```
 
-> **Note:** Call `entitlementManager.invalidate()` and `consumableManager.invalidate()` when tearing
-> down to cancel background tasks. This is a temporary workaround for a Swift 6.2 compiler issue.
+> **Note:** Call `entitlementManager.invalidate()`, `storeManager.invalidate()`, and
+> `consumableManager.invalidate()` when tearing down to cancel background tasks. This is a
+> temporary workaround for a Swift 6.2 compiler issue.
 
 ---
 
@@ -220,6 +218,53 @@ struct PaywallView: View {
     }
 }
 ```
+
+---
+
+## Keeping Entitlements Fresh
+
+`EntitlementManager` automatically handles mid-session changes via `Transaction.updates` and
+`Product.SubscriptionInfo.Status.updates`, and schedules a refresh at subscription expiry. Two
+additional patterns are recommended in the consuming app:
+
+### Foreground return
+
+When the user leaves the app and subscribes (or is granted Family Sharing access) while it is
+backgrounded, `Transaction.updates` fires on return. However, if that event was missed (e.g. the
+app was force-quit), re-checking on `scenePhase` becoming `.active` catches the gap:
+
+```swift
+@Environment(\.scenePhase) private var scenePhase
+
+var body: some View {
+    ContentView()
+        .environment(entitlementManager)
+        .environment(storeManager)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task { await storeManager.refreshAll() }
+            }
+        }
+}
+```
+
+### Reactive updates via the async stream
+
+`EntitlementManager` exposes an `entitlementUpdates: AsyncStream<Void>` that emits after every
+refresh. Use it anywhere you need to react to entitlement changes outside of SwiftUI observation
+(e.g. in a view model or background actor):
+
+```swift
+Task {
+    for await _ in entitlementManager.entitlementUpdates {
+        // Called after every successful entitlement refresh
+        await myViewModel.syncState()
+    }
+}
+```
+
+> The `onRefresh` closure is still available as a simpler alternative when only one callback is
+> needed. The stream and closure are independent — both fire on every refresh.
 
 ---
 

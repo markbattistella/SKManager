@@ -634,8 +634,7 @@ extension EntitlementManager {
     guard let expiry = subscription.expirationDate else { return true }
     let expiredAgo = Date.now.timeIntervalSince(expiry)
 
-    return expiredAgo >= 0
-      && expiredAgo < renewalSettlementInterval
+    return expiredAgo < renewalSettlementInterval
       && hasFreshSubscriptionStatus(where: { state in
         state == .subscribed || state == .inGracePeriod
       })
@@ -1115,12 +1114,14 @@ extension EntitlementManager {
         info["nextTier"] = String(localized: group.displayName)
         if let date { info["effectiveOn"] = date.ISO8601Format() }
 
+      case .crossgrade(let nextID, let date):
+        info["renewalAction"] = "crossgrade"
+        info["nextProduct"] = nextID
+        if let date { info["effectiveOn"] = date.ISO8601Format() }
+
       case .cancel(let date):
         info["renewalAction"] = "cancel"
         if let date { info["expiresOn"] = date.ISO8601Format() }
-
-      default:
-        break
       }
 
     } else if let lifetime = lifetimeEntitlements.first {

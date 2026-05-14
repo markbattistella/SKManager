@@ -18,7 +18,7 @@ import StoreKit
 /// - Note: This type is observable and runs on the main actor to ensure UI safety.
 @MainActor
 @Observable
-public final class StoreManager<
+public class StoreManager<
   Item: StoreProductRepresentable,
   Group: ProductTierRepresentable,
   E: EntitlementProvider
@@ -81,6 +81,10 @@ public final class StoreManager<
   /// The most recent error encountered during entitlement or transaction operations.
   public private(set) var lastError: Error?
 
+  /// Background task that forwards entitlement refreshes to `syncPurchaseStates`.
+  @ObservationIgnored
+  private var entitlementSyncTask: Task<Void, Never>?
+
   /// Called with the verified transaction immediately after a successful purchase completes.
   ///
   /// Use this to wire in analytics or any other post-purchase side effects without creating
@@ -114,12 +118,25 @@ public final class StoreManager<
     self.showOfferCodeRedemption = false
     self.showManageSubscriptionsSheet = false
 
-    // Automatically resyncs purchase state after entitlements refresh.
-    entitlementManager.onRefresh = { [weak self] in
-      Task { @MainActor in
-        self?.syncPurchaseStates()
+    // Automatically resyncs purchase state after every entitlement refresh.
+    // Uses the async stream so the app consumer can still set entitlementManager.onRefresh freely.
+    entitlementSyncTask = Task { @MainActor [weak self] in
+      guard let self else { return }
+      for await _ in entitlementManager.entitlementUpdates {
+        self.syncPurchaseStates()
       }
     }
+  }
+
+  /// Cancels the background entitlement-sync task.
+  ///
+  /// - Warning: Temporary workaround for a Swift 6.2 compiler issue where `deinit` containing
+  /// task cancellation causes build or archive failures. Call this explicitly when tearing down
+  /// the manager alongside `EntitlementManager.invalidate()`.
+  public func invalidate() {
+    logger.info("StoreManager invalidated")
+    entitlementSyncTask?.cancel()
+    entitlementSyncTask = nil
   }
 }
 
