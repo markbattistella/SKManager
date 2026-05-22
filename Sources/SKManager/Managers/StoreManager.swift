@@ -231,6 +231,11 @@ extension StoreManager {
         await entitlementManager.recordVerifiedTransaction(transaction)
         onPurchaseCompleted?(transaction)
         await transaction.finish()
+        // Force a full entitlement scan before syncing purchase states.
+        // recordVerifiedTransaction skips same-tier crossgrades (e.g. monthly → yearly)
+        // because handleTransaction only replaces activeSubscription when the new tier
+        // is strictly higher. A full scan sees the revoked old sub and new active one.
+        await entitlementManager.forceRefreshEntitlements()
         syncPurchaseStates()
         return .success
 
@@ -261,6 +266,10 @@ extension StoreManager {
   /// Restores all previously purchased products and subscriptions from the App Store.
   public func restorePurchases() async {
     try? await AppStore.sync()
+    // AppStore.sync() can return before restored transactions appear in
+    // Transaction.currentEntitlements. A short pause lets StoreKit propagate them
+    // so the force refresh doesn't run against a stale (empty) snapshot.
+    try? await Task.sleep(for: .milliseconds(500))
     await refreshProducts()
     await entitlementManager.forceRefreshEntitlements()
     syncPurchaseStates()

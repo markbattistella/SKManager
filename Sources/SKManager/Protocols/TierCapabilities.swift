@@ -19,42 +19,42 @@ import Foundation
 /// based on their current subscription or entitlement tier.
 public protocol TierCapabilities: Sendable {
 
-    /// The type representing the product tier hierarchy.
-    associatedtype Tier: ProductTierRepresentable & Hashable
+  /// The type representing the product tier hierarchy.
+  associatedtype Tier: ProductTierRepresentable & Hashable
 
-    /// The type representing individual features that can be gated by tier.
-    associatedtype Feature: Hashable
+  /// The type representing individual features that can be gated by tier.
+  associatedtype Feature: Hashable
 
-    /// The type that defines how feature availability is represented. Apps can use `CapabilityRule`
-    /// or define their own custom type.
-    associatedtype CapabilityValue
+  /// The type that defines how feature availability is represented. Apps can use `CapabilityRule`
+  /// or define their own custom type.
+  associatedtype CapabilityValue
 
-    /// The complete mapping of feature capabilities across all tiers.
-    var capabilities: [Feature: [Tier: CapabilityValue]] { get }
+  /// The complete mapping of feature capabilities across all tiers.
+  var capabilities: [Feature: [Tier: CapabilityValue]] { get }
 
-    /// Returns the capability value for the specified feature–tier pair.
-    ///
-    /// - Parameters:
-    ///   - feature: The feature whose capability should be retrieved.
-    ///   - tier: The tier to evaluate.
-    /// - Returns: The capability value for the feature and tier, or `nil` if undefined.
-    func capability(for feature: Feature, in tier: Tier) -> CapabilityValue?
+  /// Returns the capability value for the specified feature–tier pair.
+  ///
+  /// - Parameters:
+  ///   - feature: The feature whose capability should be retrieved.
+  ///   - tier: The tier to evaluate.
+  /// - Returns: The capability value for the feature and tier, or `nil` if undefined.
+  func capability(for feature: Feature, in tier: Tier) -> CapabilityValue?
 
-    /// Evaluates whether a given capability should be considered active or accessible.
-    ///
-    /// The conforming type defines the rules for accessibility, such as allowing `.allowed(true)`,
-    /// `.limit(> 0)`, or `.until(date > now)`.
-    ///
-    /// - Parameter capability: The capability value to evaluate.
-    /// - Returns: `true` if the capability is currently accessible; otherwise `false`.
-    func isAccessible(_ capability: CapabilityValue) -> Bool
+  /// Evaluates whether a given capability should be considered active or accessible.
+  ///
+  /// The conforming type defines the rules for accessibility, such as allowing `.allowed(true)`,
+  /// `.limit(> 0)`, or `.until(date > now)`.
+  ///
+  /// - Parameter capability: The capability value to evaluate.
+  /// - Returns: `true` if the capability is currently accessible; otherwise `false`.
+  func isAccessible(_ capability: CapabilityValue) -> Bool
 }
 
-public extension TierCapabilities {
+extension TierCapabilities {
 
-    /// Default lookup implementation that retrieves the capability value for the specified
-    /// feature and tier from the `capabilities` map.
-    func capability(for feature: Feature, in tier: Tier) -> CapabilityValue? {
-        capabilities[feature]?[tier]
-    }
+  /// Default lookup implementation that retrieves the capability value for the specified
+  /// feature and tier from the `capabilities` map.
+  public func capability(for feature: Feature, in tier: Tier) -> CapabilityValue? {
+    capabilities[feature]?[tier]
+  }
 }

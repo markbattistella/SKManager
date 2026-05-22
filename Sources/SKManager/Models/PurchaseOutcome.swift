@@ -17,15 +17,15 @@ import Foundation
 /// been fully propagated through the app.
 public enum PurchaseOutcome: Sendable {
 
-    /// The purchase completed successfully and the transaction was verified.
-    case success
+  /// The purchase completed successfully and the transaction was verified.
+  case success
 
-    /// The user explicitly cancelled the purchase flow.
-    case cancelled
+  /// The user explicitly cancelled the purchase flow.
+  case cancelled
 
-    /// The purchase is pending external action (e.g. parental approval).
-    case pending
+  /// The purchase is pending external action (e.g. parental approval).
+  case pending
 
-    /// The purchase failed due to an error.
-    case failed(any Error)
+  /// The purchase failed due to an error.
+  case failed(any Error)
 }

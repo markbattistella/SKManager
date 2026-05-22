@@ -19,6 +19,6 @@ import SimpleLogger
 /// ```
 extension LoggerCategory {
 
-    /// A `LoggerCategory` used for all StoreKit-related log messages.
-    internal static let storeKit = LoggerCategory("StoreKit")
+  /// A `LoggerCategory` used for all StoreKit-related log messages.
+  internal static let storeKit = LoggerCategory("StoreKit")
 }

@@ -12,24 +12,24 @@ import Foundation
 /// cases where the package itself prevents or cannot complete an operation.
 public enum StoreError: LocalizedError, Sendable {
 
-    /// Purchases are not permitted on this device.
-    ///
-    /// Returned when `AppStore.canMakePayments` is `false`, such as when parental controls or
-    /// an MDM profile restricts in-app purchases.
-    case purchasesUnavailable
+  /// Purchases are not permitted on this device.
+  ///
+  /// Returned when `AppStore.canMakePayments` is `false`, such as when parental controls or
+  /// an MDM profile restricts in-app purchases.
+  case purchasesUnavailable
 
-    /// No verified transaction was found for the specified product identifier.
-    ///
-    /// Returned by history and refund helpers when the requested product has no transaction
-    /// on record for the current account.
-    case transactionNotFound(productID: String)
+  /// No verified transaction was found for the specified product identifier.
+  ///
+  /// Returned by history and refund helpers when the requested product has no transaction
+  /// on record for the current account.
+  case transactionNotFound(productID: String)
 
-    public var errorDescription: String? {
-        switch self {
-            case .purchasesUnavailable:
-                return "In-app purchases are not permitted on this device."
-            case .transactionNotFound(let id):
-                return "No transaction found for '\(id)'."
-        }
+  public var errorDescription: String? {
+    switch self {
+    case .purchasesUnavailable:
+      return "In-app purchases are not permitted on this device."
+    case .transactionNotFound(let id):
+      return "No transaction found for '\(id)'."
     }
+  }
 }

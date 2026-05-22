@@ -17,17 +17,17 @@ import StoreKit
 /// models used by the app.
 public protocol StoreProductRepresentable: StoreIdentifiable, Comparable {
 
-    /// The type that defines logical tiers or levels associated with the product.
-    associatedtype Tier: ProductTierRepresentable
+  /// The type that defines logical tiers or levels associated with the product.
+  associatedtype Tier: ProductTierRepresentable
 
-    /// The order used to sort products within the same tier.
-    var sortOrder: Int { get }
+  /// The order used to sort products within the same tier.
+  var sortOrder: Int { get }
 
-    /// The StoreKit product type (e.g., subscription, consumable, non-consumable).
-    var productType: Product.ProductType { get }
+  /// The StoreKit product type (e.g., subscription, consumable, non-consumable).
+  var productType: Product.ProductType { get }
 
-    /// A mapping of tiers to the products they contain.
-    ///
-    /// Used to organise available products for display and entitlement resolution.
-    static var groupedByTier: [Tier: [Self]] { get }
+  /// A mapping of tiers to the products they contain.
+  ///
+  /// Used to organise available products for display and entitlement resolution.
+  static var groupedByTier: [Tier: [Self]] { get }
 }

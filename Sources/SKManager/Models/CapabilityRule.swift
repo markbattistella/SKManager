@@ -13,61 +13,61 @@ import Foundation
 /// systems but can be replaced with a custom type if needed.
 public enum CapabilityRule: Equatable, Sendable {
 
-    /// Indicates that access is explicitly allowed or denied.
-    case allowed(Bool)
+  /// Indicates that access is explicitly allowed or denied.
+  case allowed(Bool)
 
-    /// Indicates access is allowed with a numeric or quantity limit, such as a number of months,
-    /// entries, or items.
-    case limit(Int)
+  /// Indicates access is allowed with a numeric or quantity limit, such as a number of months,
+  /// entries, or items.
+  case limit(Int)
 
-    /// Indicates that access is temporarily available until the specified date.
-    case until(Date)
+  /// Indicates that access is temporarily available until the specified date.
+  case until(Date)
 
-    /// Indicates full and unrestricted access.
-    case unrestricted
+  /// Indicates full and unrestricted access.
+  case unrestricted
 
-    /// Indicates that the feature is unavailable or disabled.
-    case unavailable
+  /// Indicates that the feature is unavailable or disabled.
+  case unavailable
 }
 
 extension CapabilityRule {
 
-    /// Returns whether the capability is currently active or available.
-    ///
-    /// - Note: `.until(date)` is only accessible if the date has not yet passed.
-    public var isAccessible: Bool {
-        switch self {
-            case .allowed(let flag): return flag
-            case .limit, .unrestricted: return true
-            case .until(let date): return date > Date.now
-            case .unavailable: return false
-        }
+  /// Returns whether the capability is currently active or available.
+  ///
+  /// - Note: `.until(date)` is only accessible if the date has not yet passed.
+  public var isAccessible: Bool {
+    switch self {
+    case .allowed(let flag): return flag
+    case .limit, .unrestricted: return true
+    case .until(let date): return date > Date.now
+    case .unavailable: return false
     }
+  }
 
-    /// The expiry date associated with `.until` rules, if any.
-    ///
-    /// - Returns: The expiry `Date` if the rule is `.until`, otherwise `nil`.
-    public var expiry: Date? {
-        if case .until(let date) = self { return date }
-        return nil
-    }
+  /// The expiry date associated with `.until` rules, if any.
+  ///
+  /// - Returns: The expiry `Date` if the rule is `.until`, otherwise `nil`.
+  public var expiry: Date? {
+    if case .until(let date) = self { return date }
+    return nil
+  }
 
-    /// The numeric limit associated with `.limit` rules, if any.
-    ///
-    /// - Returns: The limit value if the rule is `.limit`, otherwise `nil`.
-    public var limit: Int? {
-        if case .limit(let value) = self { return value }
-        return nil
-    }
+  /// The numeric limit associated with `.limit` rules, if any.
+  ///
+  /// - Returns: The limit value if the rule is `.limit`, otherwise `nil`.
+  public var limit: Int? {
+    if case .limit(let value) = self { return value }
+    return nil
+  }
 }
 
-public extension TierCapabilities where CapabilityValue == CapabilityRule {
+extension TierCapabilities where CapabilityValue == CapabilityRule {
 
-    /// Provides a default implementation of `isAccessible(_:)` for conformers using the built-in
-    /// `CapabilityRule` type.
-    ///
-    /// This simply delegates to the `CapabilityRule.isAccessible` property.
-    func isAccessible(_ capability: CapabilityRule) -> Bool {
-        capability.isAccessible
-    }
+  /// Provides a default implementation of `isAccessible(_:)` for conformers using the built-in
+  /// `CapabilityRule` type.
+  ///
+  /// This simply delegates to the `CapabilityRule.isAccessible` property.
+  public func isAccessible(_ capability: CapabilityRule) -> Bool {
+    capability.isAccessible
+  }
 }

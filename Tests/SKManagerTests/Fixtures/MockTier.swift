@@ -5,6 +5,7 @@
 //
 
 import Foundation
+
 @testable import SKManager
 
 /// A minimal `ProductTierRepresentable` for use in tests.
@@ -14,18 +15,18 @@ import Foundation
 /// - `.standard` = 2
 /// - `.basic` = 3 (least premium)
 enum MockTier: String, ProductTierRepresentable, CaseIterable {
-    case premium
-    case standard
-    case basic
+  case premium
+  case standard
+  case basic
 
-    var displayName: LocalizedStringResource { "\(rawValue)" }
-    var description: LocalizedStringResource { "\(rawValue) tier" }
+  var displayName: LocalizedStringResource { "\(rawValue)" }
+  var description: LocalizedStringResource { "\(rawValue) tier" }
 
-    var tierLevel: Int {
-        switch self {
-            case .premium: return 1
-            case .standard: return 2
-            case .basic: return 3
-        }
+  var tierLevel: Int {
+    switch self {
+    case .premium: return 1
+    case .standard: return 2
+    case .basic: return 3
     }
+  }
 }

@@ -16,8 +16,8 @@ import Foundation
 public protocol StoreIdentifiable: Identifiable, CaseIterable, Hashable, Sendable, RawRepresentable
 where RawValue == String {}
 
-public extension StoreIdentifiable {
+extension StoreIdentifiable {
 
-    /// A unique string identifier for the store item.
-    var id: String { rawValue }
+  /// A unique string identifier for the store item.
+  public var id: String { rawValue }
 }
