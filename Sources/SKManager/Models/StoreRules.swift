@@ -15,7 +15,7 @@ import Foundation
 /// options. Rules operate at two levels:
 /// - **Group level** (`groupHideMap`): hides an entire tier when a specific product is owned.
 /// - **Product level** (`hideMap`/`showMap`): hides or reveals individual products within a tier.
-public struct StoreRules<Item: StoreProductRepresentable> {
+public struct StoreRules<Item: StoreProductRepresentable>: Sendable {
 
   /// The set of products visible when the user owns no items.
   internal let defaultVisible: Set<Item>

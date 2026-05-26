@@ -4,188 +4,118 @@
 // Website: https://markbattistella.com
 //
 
-import XCTest
+import Testing
 
 @testable import SKManager
 
-final class StoreConfigTests: XCTestCase {
+@Suite("StoreConfig")
+struct StoreConfigTests {
 
-  // MARK: - Helpers
+  @Test("Default config has no conflicts")
+  func defaultConfigHasNoConflicts() {
+    let config = StoreConfig<MockTier, MockItem>.defaultConfig
+
+    #expect(
+      !config.hasConflicts(
+        activeTiers: [.premium, .standard],
+        ownedProducts: [MockItem.premiumMonthly.rawValue, MockItem.standardMonthly.rawValue]
+      ))
+  }
+
+  @Test("No rules has no conflict")
+  func noRulesHasNoConflict() {
+    let config = makeConfig()
+
+    #expect(!config.hasConflicts(activeTiers: [.premium, .standard], ownedProducts: []))
+    #expect(!config.hasConflicts(activeTiers: [], ownedProducts: []))
+  }
+
+  @Test("Tier conflicts are detected only when both tiers are active")
+  func tierConflictsAreDetectedOnlyWhenBothTiersAreActive() {
+    let config = makeConfig(conflictGroups: [.premium: [.standard]])
+
+    #expect(config.hasConflicts(activeTiers: [.premium, .standard], ownedProducts: []))
+    #expect(!config.hasConflicts(activeTiers: [.premium], ownedProducts: []))
+    #expect(!config.hasConflicts(activeTiers: [.basic, .standard], ownedProducts: []))
+  }
+
+  @Test("Tier conflict list can match any configured conflict")
+  func tierConflictListCanMatchAnyConfiguredConflict() {
+    let config = makeConfig(conflictGroups: [.premium: [.standard, .basic]])
+
+    #expect(config.hasConflicts(activeTiers: [.premium, .basic], ownedProducts: []))
+    #expect(config.hasConflicts(activeTiers: [.premium, .standard], ownedProducts: []))
+  }
+
+  @Test("Tier conflicts can be declared from either side")
+  func tierConflictsCanBeDeclaredFromEitherSide() {
+    let premiumRule = makeConfig(conflictGroups: [.premium: [.standard]])
+    let standardRule = makeConfig(conflictGroups: [.standard: [.premium]])
+
+    #expect(premiumRule.hasConflicts(activeTiers: [.premium, .standard], ownedProducts: []))
+    #expect(standardRule.hasConflicts(activeTiers: [.premium, .standard], ownedProducts: []))
+  }
+
+  @Test("Product conflicts are detected only when both products are owned")
+  func productConflictsAreDetectedOnlyWhenBothProductsAreOwned() {
+    let config = makeConfig(conflictProducts: [.premiumMonthly: [.standardMonthly]])
+
+    #expect(
+      config.hasConflicts(
+        activeTiers: [],
+        ownedProducts: [MockItem.premiumMonthly.rawValue, MockItem.standardMonthly.rawValue]
+      ))
+    #expect(
+      !config.hasConflicts(
+        activeTiers: [],
+        ownedProducts: [MockItem.premiumMonthly.rawValue]
+      ))
+    #expect(
+      !config.hasConflicts(
+        activeTiers: [],
+        ownedProducts: [MockItem.basicMonthly.rawValue, MockItem.addonPack.rawValue]
+      ))
+  }
+
+  @Test("Product conflict list can match any configured conflict")
+  func productConflictListCanMatchAnyConfiguredConflict() {
+    let config = makeConfig(conflictProducts: [.addonPack: [.basicMonthly, .standardMonthly]])
+
+    #expect(
+      config.hasConflicts(
+        activeTiers: [],
+        ownedProducts: [MockItem.addonPack.rawValue, MockItem.standardMonthly.rawValue]
+      ))
+  }
+
+  @Test("Mixed conflicts report tier or product conflicts independently")
+  func mixedConflictsReportTierOrProductConflictsIndependently() {
+    let config = makeConfig(
+      conflictGroups: [.premium: [.standard]],
+      conflictProducts: [.addonPack: [.basicMonthly]]
+    )
+
+    #expect(
+      config.hasConflicts(
+        activeTiers: [.premium, .standard],
+        ownedProducts: [MockItem.premiumMonthly.rawValue]
+      ))
+    #expect(
+      config.hasConflicts(
+        activeTiers: [.premium],
+        ownedProducts: [MockItem.addonPack.rawValue, MockItem.basicMonthly.rawValue]
+      ))
+    #expect(
+      !config.hasConflicts(
+        activeTiers: [.premium, .basic],
+        ownedProducts: [MockItem.addonPack.rawValue, MockItem.standardMonthly.rawValue]
+      ))
+  }
 
   private func makeConfig(
     conflictGroups: [MockTier: [MockTier]] = [:],
     conflictProducts: [MockItem: [MockItem]] = [:]
   ) -> StoreConfig<MockTier, MockItem> {
     StoreConfig(conflictGroups: conflictGroups, conflictProducts: conflictProducts)
-  }
-
-  // MARK: - defaultConfig
-
-  func testDefaultConfig_noConflicts() {
-    let config = StoreConfig<MockTier, MockItem>.defaultConfig
-    XCTAssertFalse(
-      config.hasConflicts(
-        activeTiers: [.premium, .standard],
-        ownedProducts: [MockItem.premiumMonthly.rawValue, MockItem.standardMonthly.rawValue]
-      ))
-  }
-
-  // MARK: - No conflicts
-
-  func testNoRules_noConflict() {
-    let config = makeConfig()
-    XCTAssertFalse(
-      config.hasConflicts(
-        activeTiers: [.premium, .standard],
-        ownedProducts: []
-      ))
-  }
-
-  func testNoRules_emptyInputs_noConflict() {
-    let config = makeConfig()
-    XCTAssertFalse(config.hasConflicts(activeTiers: [], ownedProducts: []))
-  }
-
-  // MARK: - conflictGroups
-
-  func testTierConflict_detected() {
-    let config = makeConfig(conflictGroups: [.premium: [.standard]])
-    XCTAssertTrue(
-      config.hasConflicts(
-        activeTiers: [.premium, .standard],
-        ownedProducts: []
-      ))
-  }
-
-  func testTierConflict_onlyOneTierOwned_noConflict() {
-    let config = makeConfig(conflictGroups: [.premium: [.standard]])
-    XCTAssertFalse(
-      config.hasConflicts(
-        activeTiers: [.premium],
-        ownedProducts: []
-      ))
-  }
-
-  func testTierConflict_differentTierOwned_noConflict() {
-    let config = makeConfig(conflictGroups: [.premium: [.standard]])
-    // Owning basic and standard — the rule only fires when premium is active
-    XCTAssertFalse(
-      config.hasConflicts(
-        activeTiers: [.basic, .standard],
-        ownedProducts: []
-      ))
-  }
-
-  func testTierConflict_multipleConflictsInList_firstMatch() {
-    let config = makeConfig(conflictGroups: [.premium: [.standard, .basic]])
-    XCTAssertTrue(
-      config.hasConflicts(
-        activeTiers: [.premium, .basic],
-        ownedProducts: []
-      ))
-  }
-
-  func testTierConflict_multipleConflictsInList_secondMatch() {
-    let config = makeConfig(conflictGroups: [.premium: [.standard, .basic]])
-    XCTAssertTrue(
-      config.hasConflicts(
-        activeTiers: [.premium, .standard],
-        ownedProducts: []
-      ))
-  }
-
-  func testTierConflict_symmetryIsNotAutomatic() {
-    // Rules are one-directional: [.standard: [.premium]] does NOT trigger when only
-    // [.premium: [.standard]] is declared
-    let config = makeConfig(conflictGroups: [.premium: [.standard]])
-    // Conflict triggers because the KEY (.premium) is in activeTiers
-    XCTAssertTrue(
-      config.hasConflicts(
-        activeTiers: [.premium, .standard],
-        ownedProducts: []
-      ))
-    // No symmetric rule declared, but same tiers still match the one existing rule
-    let config2 = makeConfig(conflictGroups: [.standard: [.premium]])
-    XCTAssertTrue(
-      config2.hasConflicts(
-        activeTiers: [.premium, .standard],
-        ownedProducts: []
-      ))
-  }
-
-  // MARK: - conflictProducts
-
-  func testProductConflict_detected() {
-    let config = makeConfig(conflictProducts: [.premiumMonthly: [.standardMonthly]])
-    XCTAssertTrue(
-      config.hasConflicts(
-        activeTiers: [],
-        ownedProducts: [MockItem.premiumMonthly.rawValue, MockItem.standardMonthly.rawValue]
-      ))
-  }
-
-  func testProductConflict_onlyOneOwned_noConflict() {
-    let config = makeConfig(conflictProducts: [.premiumMonthly: [.standardMonthly]])
-    XCTAssertFalse(
-      config.hasConflicts(
-        activeTiers: [],
-        ownedProducts: [MockItem.premiumMonthly.rawValue]
-      ))
-  }
-
-  func testProductConflict_unrelatedProducts_noConflict() {
-    let config = makeConfig(conflictProducts: [.premiumMonthly: [.standardMonthly]])
-    XCTAssertFalse(
-      config.hasConflicts(
-        activeTiers: [],
-        ownedProducts: [MockItem.basicMonthly.rawValue, MockItem.addonPack.rawValue]
-      ))
-  }
-
-  func testProductConflict_multipleConflictsInList() {
-    let config = makeConfig(conflictProducts: [.addonPack: [.basicMonthly, .standardMonthly]])
-    XCTAssertTrue(
-      config.hasConflicts(
-        activeTiers: [],
-        ownedProducts: [MockItem.addonPack.rawValue, MockItem.standardMonthly.rawValue]
-      ))
-  }
-
-  // MARK: - Mixed tier and product conflicts
-
-  func testMixed_tierConflictOnly_detected() {
-    let config = makeConfig(
-      conflictGroups: [.premium: [.standard]],
-      conflictProducts: [.addonPack: [.basicMonthly]]
-    )
-    XCTAssertTrue(
-      config.hasConflicts(
-        activeTiers: [.premium, .standard],
-        ownedProducts: [MockItem.premiumMonthly.rawValue]
-      ))
-  }
-
-  func testMixed_productConflictOnly_detected() {
-    let config = makeConfig(
-      conflictGroups: [.premium: [.standard]],
-      conflictProducts: [.addonPack: [.basicMonthly]]
-    )
-    XCTAssertTrue(
-      config.hasConflicts(
-        activeTiers: [.premium],
-        ownedProducts: [MockItem.addonPack.rawValue, MockItem.basicMonthly.rawValue]
-      ))
-  }
-
-  func testMixed_neitherConflict_noConflict() {
-    let config = makeConfig(
-      conflictGroups: [.premium: [.standard]],
-      conflictProducts: [.addonPack: [.basicMonthly]]
-    )
-    XCTAssertFalse(
-      config.hasConflicts(
-        activeTiers: [.premium, .basic],
-        ownedProducts: [MockItem.addonPack.rawValue, MockItem.standardMonthly.rawValue]
-      ))
   }
 }

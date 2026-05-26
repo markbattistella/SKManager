@@ -10,13 +10,19 @@ import Foundation
 ///
 /// StoreKit errors pass through as-is inside `PurchaseOutcome.failed`. `StoreError` covers
 /// cases where the package itself prevents or cannot complete an operation.
-public enum StoreError: LocalizedError, Sendable {
+public enum StoreError: Equatable, LocalizedError, Sendable {
 
   /// Purchases are not permitted on this device.
   ///
   /// Returned when `AppStore.canMakePayments` is `false`, such as when parental controls or
   /// an MDM profile restricts in-app purchases.
   case purchasesUnavailable
+
+  /// A consumable transaction could not be delivered because no delivery handler was configured.
+  ///
+  /// The transaction is intentionally left unfinished so StoreKit can re-deliver it after the app
+  /// configures `ConsumableManager.onDeliver`.
+  case missingConsumableDeliveryHandler(productID: String)
 
   /// No verified transaction was found for the specified product identifier.
   ///
@@ -28,6 +34,8 @@ public enum StoreError: LocalizedError, Sendable {
     switch self {
     case .purchasesUnavailable:
       return "In-app purchases are not permitted on this device."
+    case .missingConsumableDeliveryHandler(let id):
+      return "Consumable '\(id)' cannot be finished because no delivery handler is configured."
     case .transactionNotFound(let id):
       return "No transaction found for '\(id)'."
     }

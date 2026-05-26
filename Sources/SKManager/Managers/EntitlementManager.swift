@@ -27,6 +27,7 @@ public final class EntitlementManager<
   // MARK: - Properties
 
   /// Logger used for entitlement and StoreKit event reporting.
+  @ObservationIgnored
   private let logger = SimpleLogger(category: .storeKit)
 
   /// The asynchronous task that listens for StoreKit transaction updates.
@@ -808,9 +809,11 @@ extension EntitlementManager {
     switch transaction.productType {
     case .autoRenewable, .nonRenewable:
       let sub = await buildSubscription(from: transaction, group: group)
-      if let existing = activeSub, group.tierLevel < existing.tier.tierLevel {
-        activeSub = sub
-      } else if activeSub == nil {
+      if let existing = activeSub {
+        if shouldReplaceSubscription(sub, over: existing) {
+          activeSub = sub
+        }
+      } else {
         activeSub = sub
       }
 
@@ -830,6 +833,29 @@ extension EntitlementManager {
     }
 
     return true
+  }
+
+  /// Chooses the strongest active subscription when StoreKit returns multiple candidates.
+  ///
+  /// Lower tier levels are more premium. For products in the same tier, prefer the entitlement
+  /// with the latest expiration date so same-tier crossgrades do not leave stale plan state active.
+  private func shouldReplaceSubscription(
+    _ candidate: SubscriptionEntitlement<Group>,
+    over existing: SubscriptionEntitlement<Group>
+  ) -> Bool {
+    if candidate.tier.tierLevel < existing.tier.tierLevel { return true }
+    if candidate.tier.tierLevel > existing.tier.tierLevel { return false }
+
+    switch (candidate.expirationDate, existing.expirationDate) {
+    case (.none, .some):
+      return true
+    case (.some, .none):
+      return false
+    case (.some(let candidateDate), .some(let existingDate)):
+      return candidateDate > existingDate
+    case (.none, .none):
+      return candidate.productID != existing.productID
+    }
   }
 }
 

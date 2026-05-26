@@ -4,121 +4,63 @@
 // Website: https://markbattistella.com
 //
 
-import XCTest
+import Foundation
+import Testing
 
 @testable import SKManager
 
-final class CapabilityRuleTests: XCTestCase {
+@Suite("CapabilityRule")
+struct CapabilityRuleTests {
 
-  // MARK: - isAccessible
-
-  func testAllowedTrue_isAccessible() {
-    XCTAssertTrue(CapabilityRule.allowed(true).isAccessible)
+  @Test(
+    "Accessibility reflects each rule",
+    arguments: [
+      (CapabilityRule.allowed(true), true),
+      (CapabilityRule.allowed(false), false),
+      (CapabilityRule.limit(5), true),
+      (CapabilityRule.limit(0), true),
+      (CapabilityRule.until(.distantFuture), true),
+      (CapabilityRule.until(.distantPast), false),
+      (CapabilityRule.unrestricted, true),
+      (CapabilityRule.unavailable, false),
+    ]
+  )
+  func accessibility(rule: CapabilityRule, expected: Bool) {
+    #expect(rule.isAccessible == expected)
   }
 
-  func testAllowedFalse_isNotAccessible() {
-    XCTAssertFalse(CapabilityRule.allowed(false).isAccessible)
+  @Test("Expired until rule is inaccessible")
+  func expiredUntilRuleIsInaccessible() {
+    #expect(!CapabilityRule.until(Date.now.addingTimeInterval(-1)).isAccessible)
   }
 
-  func testLimitPositive_isAccessible() {
-    XCTAssertTrue(CapabilityRule.limit(5).isAccessible)
-  }
-
-  func testLimitZero_isAccessible() {
-    // A limit of 0 still counts as accessible (caller checks the limit value separately)
-    XCTAssertTrue(CapabilityRule.limit(0).isAccessible)
-  }
-
-  func testUntilFutureDate_isAccessible() {
-    XCTAssertTrue(CapabilityRule.until(.distantFuture).isAccessible)
-  }
-
-  func testUntilPastDate_isNotAccessible() {
-    XCTAssertFalse(CapabilityRule.until(.distantPast).isAccessible)
-  }
-
-  func testUntilNow_isNotAccessible() {
-    // A date set just before now should fail the > check
-    let slightlyPast = Date.now.addingTimeInterval(-1)
-    XCTAssertFalse(CapabilityRule.until(slightlyPast).isAccessible)
-  }
-
-  func testUnrestricted_isAccessible() {
-    XCTAssertTrue(CapabilityRule.unrestricted.isAccessible)
-  }
-
-  func testUnavailable_isNotAccessible() {
-    XCTAssertFalse(CapabilityRule.unavailable.isAccessible)
-  }
-
-  // MARK: - expiry
-
-  func testExpiry_returnsDateForUntilRule() {
+  @Test("Expiry returns only until dates")
+  func expiryReturnsOnlyUntilDates() {
     let date = Date.distantFuture
-    XCTAssertEqual(CapabilityRule.until(date).expiry, date)
+
+    #expect(CapabilityRule.until(date).expiry == date)
+    #expect(CapabilityRule.allowed(true).expiry == nil)
+    #expect(CapabilityRule.limit(10).expiry == nil)
+    #expect(CapabilityRule.unrestricted.expiry == nil)
+    #expect(CapabilityRule.unavailable.expiry == nil)
   }
 
-  func testExpiry_isNilForAllowedRule() {
-    XCTAssertNil(CapabilityRule.allowed(true).expiry)
+  @Test("Limit returns only limit values")
+  func limitReturnsOnlyLimitValues() {
+    #expect(CapabilityRule.limit(7).limit == 7)
+    #expect(CapabilityRule.allowed(true).limit == nil)
+    #expect(CapabilityRule.unrestricted.limit == nil)
+    #expect(CapabilityRule.until(.distantFuture).limit == nil)
   }
 
-  func testExpiry_isNilForLimitRule() {
-    XCTAssertNil(CapabilityRule.limit(10).expiry)
-  }
-
-  func testExpiry_isNilForUnrestricted() {
-    XCTAssertNil(CapabilityRule.unrestricted.expiry)
-  }
-
-  func testExpiry_isNilForUnavailable() {
-    XCTAssertNil(CapabilityRule.unavailable.expiry)
-  }
-
-  // MARK: - limit
-
-  func testLimit_returnsValueForLimitRule() {
-    XCTAssertEqual(CapabilityRule.limit(7).limit, 7)
-  }
-
-  func testLimit_isNilForAllowedRule() {
-    XCTAssertNil(CapabilityRule.allowed(true).limit)
-  }
-
-  func testLimit_isNilForUnrestricted() {
-    XCTAssertNil(CapabilityRule.unrestricted.limit)
-  }
-
-  func testLimit_isNilForUntilRule() {
-    XCTAssertNil(CapabilityRule.until(.distantFuture).limit)
-  }
-
-  // MARK: - Equatable
-
-  func testEquality_sameAllowed() {
-    XCTAssertEqual(CapabilityRule.allowed(true), CapabilityRule.allowed(true))
-  }
-
-  func testEquality_differentAllowed() {
-    XCTAssertNotEqual(CapabilityRule.allowed(true), CapabilityRule.allowed(false))
-  }
-
-  func testEquality_sameLimit() {
-    XCTAssertEqual(CapabilityRule.limit(3), CapabilityRule.limit(3))
-  }
-
-  func testEquality_differentLimit() {
-    XCTAssertNotEqual(CapabilityRule.limit(3), CapabilityRule.limit(5))
-  }
-
-  func testEquality_unrestricted() {
-    XCTAssertEqual(CapabilityRule.unrestricted, CapabilityRule.unrestricted)
-  }
-
-  func testEquality_unavailable() {
-    XCTAssertEqual(CapabilityRule.unavailable, CapabilityRule.unavailable)
-  }
-
-  func testEquality_differentCases() {
-    XCTAssertNotEqual(CapabilityRule.unrestricted, CapabilityRule.unavailable)
+  @Test("Rules compare by case and associated value")
+  func rulesCompareByCaseAndAssociatedValue() {
+    #expect(CapabilityRule.allowed(true) == .allowed(true))
+    #expect(CapabilityRule.allowed(true) != .allowed(false))
+    #expect(CapabilityRule.limit(3) == .limit(3))
+    #expect(CapabilityRule.limit(3) != .limit(5))
+    #expect(CapabilityRule.unrestricted == .unrestricted)
+    #expect(CapabilityRule.unavailable == .unavailable)
+    #expect(CapabilityRule.unrestricted != .unavailable)
   }
 }

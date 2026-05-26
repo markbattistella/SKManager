@@ -212,56 +212,66 @@ extension StoreManager {
   ///
   /// - Note: A `.success` result indicates that the transaction completed successfully, was
   /// verified, and was applied to the entitlement manager.
-  public func purchase(
-    _ product: Product,
-    options: Set<Product.PurchaseOption> = []
-  ) async -> PurchaseOutcome {
-    guard AppStore.canMakePayments else {
-      purchaseStates[product.id] = .ready(price: product.displayPrice)
-      return .failed(StoreError.purchasesUnavailable)
+  #if os(visionOS)
+    @available(
+      visionOS, unavailable, message: "Direct StoreKit purchases are unavailable on visionOS."
+    )
+    public func purchase(
+      _ product: Product,
+      options: Set<Product.PurchaseOption> = []
+    ) async -> PurchaseOutcome {
+      .failed(StoreError.purchasesUnavailable)
     }
-
-    purchaseStates[product.id] = .purchasing
-
-    do {
-      let result = try await product.purchase(options: options)
-
-      switch result {
-      case .success(.verified(let transaction)):
-        await entitlementManager.recordVerifiedTransaction(transaction)
-        onPurchaseCompleted?(transaction)
-        await transaction.finish()
-        // Force a full entitlement scan before syncing purchase states.
-        // recordVerifiedTransaction skips same-tier crossgrades (e.g. monthly → yearly)
-        // because handleTransaction only replaces activeSubscription when the new tier
-        // is strictly higher. A full scan sees the revoked old sub and new active one.
-        await entitlementManager.forceRefreshEntitlements()
-        syncPurchaseStates()
-        return .success
-
-      case .success(.unverified(_, let error)):
-        purchaseStates[product.id] = .failed(error)
-        lastError = error
-        return .failed(error)
-
-      case .pending:
-        purchaseStates[product.id] = .pending
-        return .pending
-
-      case .userCancelled:
+  #else
+    public func purchase(
+      _ product: Product,
+      options: Set<Product.PurchaseOption> = []
+    ) async -> PurchaseOutcome {
+      guard AppStore.canMakePayments else {
         purchaseStates[product.id] = .ready(price: product.displayPrice)
-        return .cancelled
-
-      @unknown default:
-        purchaseStates[product.id] = .ready(price: product.displayPrice)
-        return .cancelled
+        return .failed(StoreError.purchasesUnavailable)
       }
-    } catch {
-      lastError = error
-      purchaseStates[product.id] = .failed(error)
-      return .failed(error)
+
+      purchaseStates[product.id] = .purchasing
+
+      do {
+        let result = try await product.purchase(options: options)
+
+        switch result {
+        case .success(.verified(let transaction)):
+          await entitlementManager.recordVerifiedTransaction(transaction)
+          onPurchaseCompleted?(transaction)
+          await transaction.finish()
+          // Force a full entitlement scan before syncing purchase states.
+          // StoreKit may still be settling renewal info around upgrades and crossgrades.
+          await entitlementManager.forceRefreshEntitlements()
+          syncPurchaseStates()
+          return .success
+
+        case .success(.unverified(_, let error)):
+          purchaseStates[product.id] = .failed(error)
+          lastError = error
+          return .failed(error)
+
+        case .pending:
+          purchaseStates[product.id] = .pending
+          return .pending
+
+        case .userCancelled:
+          purchaseStates[product.id] = .ready(price: product.displayPrice)
+          return .cancelled
+
+        @unknown default:
+          purchaseStates[product.id] = .ready(price: product.displayPrice)
+          return .cancelled
+        }
+      } catch {
+        lastError = error
+        purchaseStates[product.id] = .failed(error)
+        return .failed(error)
+      }
     }
-  }
+  #endif
 
   /// Restores all previously purchased products and subscriptions from the App Store.
   public func restorePurchases() async {
@@ -453,12 +463,21 @@ extension StoreManager {
   /// - Parameter productID: The product identifier to look up.
   /// - Returns: The latest verified transaction, or `nil`.
   public func latestTransaction(for productID: String) async -> Transaction? {
+    var latest: Transaction?
+
     for await item in Transaction.all {
       if case .verified(let transaction) = item, transaction.productID == productID {
-        return transaction
+        if let currentLatest = latest {
+          if transaction.purchaseDate > currentLatest.purchaseDate {
+            latest = transaction
+          }
+        } else {
+          latest = transaction
+        }
       }
     }
-    return nil
+
+    return latest
   }
 }
 

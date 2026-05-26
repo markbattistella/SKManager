@@ -29,7 +29,11 @@ All of this is expressed declaratively through `StoreRules` and `TierCapabilitie
 ## Requirements
 
 - iOS 17+, macOS 14+, tvOS 17+, watchOS 10+, visionOS 1+
-- Swift 6
+- Swift 6.0+
+
+Direct `purchase` entry points are unavailable on visionOS because StoreKit does not expose
+`Product.purchase(options:)` on that platform. Product loading, entitlement tracking, rules, and
+state helpers still compile for visionOS.
 
 ---
 
@@ -38,7 +42,7 @@ All of this is expressed declaratively through `StoreRules` and `TierCapabilitie
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/markbattistella/SKManager", from: "1.0.0")
+    .package(url: "https://github.com/markbattistella/SKManager", from: "26.5.22")
 ]
 ```
 
@@ -270,6 +274,8 @@ Task {
 
 ## Purchasing
 
+Direct purchase APIs are available on iOS, macOS, tvOS, and watchOS.
+
 ```swift
 let outcome = await store.purchase(product)
 // or with promotional offers:
@@ -406,7 +412,10 @@ await consumableManager.fetchProducts()
 let outcome = await consumableManager.purchase(product)
 ```
 
-The handler is guaranteed to be called before `transaction.finish()`. If the app crashes between purchase and delivery, the transaction re-delivers on the next launch.
+The handler is guaranteed to be called before `transaction.finish()`. If no handler is configured,
+SKManager returns `.failed(StoreError.missingConsumableDeliveryHandler)` and intentionally leaves
+the transaction unfinished so StoreKit can re-deliver it after delivery is configured. If the app
+crashes between purchase and delivery, the transaction also re-delivers on the next launch.
 
 ---
 

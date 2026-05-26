@@ -139,43 +139,59 @@ extension ConsumableManager {
   ///   - product: The consumable `Product` to purchase.
   ///   - options: Optional purchase options such as promotional offers. Defaults to an empty set.
   /// - Returns: A `PurchaseOutcome` describing the result of the purchase attempt.
-  public func purchase(
-    _ product: Product,
-    options: Set<Product.PurchaseOption> = []
-  ) async -> PurchaseOutcome {
-    guard AppStore.canMakePayments else {
-      logger.warning("Purchases are not available on this device")
-      return .failed(StoreError.purchasesUnavailable)
+  #if os(visionOS)
+    @available(
+      visionOS, unavailable, message: "Direct StoreKit purchases are unavailable on visionOS."
+    )
+    public func purchase(
+      _ product: Product,
+      options: Set<Product.PurchaseOption> = []
+    ) async -> PurchaseOutcome {
+      .failed(StoreError.purchasesUnavailable)
     }
-
-    do {
-      let result = try await product.purchase(options: options)
-
-      switch result {
-      case .success(.verified(let transaction)):
-        await deliver(transaction)
-        return .success
-
-      case .success(.unverified(_, let error)):
-        lastError = error
-        logger.warning("Unverified consumable transaction: \(error)")
-        return .failed(error)
-
-      case .pending:
-        return .pending
-
-      case .userCancelled:
-        return .cancelled
-
-      @unknown default:
-        return .cancelled
+  #else
+    public func purchase(
+      _ product: Product,
+      options: Set<Product.PurchaseOption> = []
+    ) async -> PurchaseOutcome {
+      guard AppStore.canMakePayments else {
+        logger.warning("Purchases are not available on this device")
+        return .failed(StoreError.purchasesUnavailable)
       }
-    } catch {
-      lastError = error
-      logger.error("Consumable purchase error: \(error)")
-      return .failed(error)
+
+      do {
+        let result = try await product.purchase(options: options)
+
+        switch result {
+        case .success(.verified(let transaction)):
+          do {
+            try await deliver(transaction)
+            return .success
+          } catch {
+            return .failed(error)
+          }
+
+        case .success(.unverified(_, let error)):
+          lastError = error
+          logger.warning("Unverified consumable transaction: \(error)")
+          return .failed(error)
+
+        case .pending:
+          return .pending
+
+        case .userCancelled:
+          return .cancelled
+
+        @unknown default:
+          return .cancelled
+        }
+      } catch {
+        lastError = error
+        logger.error("Consumable purchase error: \(error)")
+        return .failed(error)
+      }
     }
-  }
+  #endif
 }
 
 // MARK: - Transaction Observation
@@ -198,7 +214,11 @@ extension ConsumableManager {
         // Hop to MainActor for delivery so onDeliver runs on the main actor
         // and handledTransactionIDs is accessed without data races.
         Task { @MainActor [weak self] in
-          await self?.deliver(transaction)
+          do {
+            try await self?.deliver(transaction)
+          } catch {
+            self?.logger.warning("Consumable delivery skipped: \(error)")
+          }
         }
       }
     }
@@ -211,22 +231,26 @@ extension ConsumableManager {
 
   /// Delivers a verified consumable transaction to the app and finishes it.
   ///
-  /// Deduplication is applied using the transaction ID to guard against duplicate
-  /// deliveries within a session. `onDeliver` is always called before `transaction.finish()`.
-  private func deliver(_ transaction: Transaction) async {
+  /// Deduplication is applied using the transaction ID to guard against duplicate deliveries
+  /// within a session. A transaction is finished only after `onDeliver` has been configured and
+  /// has returned.
+  private func deliver(_ transaction: Transaction) async throws {
+    guard let onDeliver else {
+      let error = StoreError.missingConsumableDeliveryHandler(productID: transaction.productID)
+      lastError = error
+      logger.warning(
+        "Consumable \(transaction.productID) has no delivery handler; leaving transaction unfinished"
+      )
+      throw error
+    }
+
     guard handledTransactionIDs.insert(transaction.id.description).inserted else {
       logger.debug("Skipping already-handled consumable transaction \(transaction.id)")
       return
     }
 
-    if onDeliver == nil {
-      logger.warning(
-        "Consumable \(transaction.productID) finished with no delivery — set onDeliver to apply the effect"
-      )
-    }
-
     logger.info("Delivering consumable transaction: \(transaction.productID)")
-    await onDeliver?(transaction)
+    await onDeliver(transaction)
     await transaction.finish()
     logger.info("Finished consumable transaction: \(transaction.productID)")
   }
