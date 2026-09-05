@@ -107,6 +107,14 @@ public final class EntitlementManager<
     @ObservationIgnored
     private let config: Capabilities
 
+    /// The defaults store used for the launch-time entitlement cache, or `nil` to disable it.
+    @ObservationIgnored
+    private let userDefaults: UserDefaults?
+
+    /// Namespaces persisted entitlements independently of other managers in the same app.
+    @ObservationIgnored
+    private let cacheKey: String
+
     /// The continuation used to yield values into the `entitlementUpdates` stream.
     @ObservationIgnored
     private var entitlementContinuation: AsyncStream<Void>.Continuation?
@@ -135,6 +143,12 @@ public final class EntitlementManager<
     /// doesn't reliably track the underlying `activeSubscription`/`lifetimeEntitlements` chain.
     public private(set) var refreshCount: Int = 0
 
+    /// Whether the current state is unresolved, restored from cache, or resolved by StoreKit.
+    ///
+    /// Cached state is available synchronously during initialization. It remains provisional
+    /// until a full StoreKit refresh completes, even if a live update changes one product first.
+    public private(set) var resolutionState: EntitlementResolutionState = .unresolved
+
     /// A closure executed whenever entitlements are refreshed.
     ///
     /// This callback is invoked after transaction updates or explicit refresh operations.
@@ -158,10 +172,20 @@ public final class EntitlementManager<
     /// - Parameters:
     ///   - config: The tier-capability configuration defining feature access and limits.
     ///   - defaultTier: An optional fallback tier to apply when no entitlements are active.
-    public init(config: Capabilities, defaultTier: Group? = nil) {
+    ///   - cacheKey: A stable cache key. Defaults to a key scoped to the product and tier types.
+    ///   - userDefaults: The cache store. Defaults to `.standard`; pass `nil` to disable caching.
+    public init(
+        config: Capabilities,
+        defaultTier: Group? = nil,
+        cacheKey: String? = nil,
+        userDefaults: UserDefaults? = .standard
+    ) {
         self.expiryTask = nil
         self.defaultTier = defaultTier
         self.config = config
+        self.cacheKey = cacheKey
+            ?? "SKManager.entitlements.\(String(describing: Item.self)).\(String(describing: Group.self))"
+        self.userDefaults = userDefaults
         self.purchasedProductIDs = []
         self.activeSubscription = nil
         self.lifetimeEntitlements = []
@@ -171,6 +195,12 @@ public final class EntitlementManager<
         )
         self.entitlementUpdates = stream
         self.entitlementContinuation = continuation
+
+        // Restore before any caller can read effectiveTier or start rendering a view.
+        self.restoreCachedSnapshot()
+        if let expiry = activeSubscription?.expirationDate {
+            self.scheduleExpiryRefresh(at: expiry)
+        }
 
         // Start observing transactions early, but asynchronously.
         self.startObservingTransactions()
@@ -208,6 +238,87 @@ public final class EntitlementManager<
     }
 }
 
+// MARK: - Entitlement Cache
+
+extension EntitlementManager {
+    private func restoreCachedSnapshot() {
+        guard let data = userDefaults?.data(forKey: cacheKey) else { return }
+        guard let snapshot = try? JSONDecoder().decode(EntitlementSnapshot.self, from: data),
+            snapshot.version == 1
+        else {
+            logger.warning("Ignoring an invalid or unsupported entitlement cache")
+            return
+        }
+
+        if let subscription = snapshot.activeSubscription,
+            subscription.expirationDate.map({ $0 > Date.now }) ?? true,
+            let item = Item(rawValue: subscription.productID),
+            item.productType == .autoRenewable || item.productType == .nonRenewable,
+            let tier = cachedTier(for: item, rawValue: subscription.tierRawValue)
+        {
+            activeSubscription = SubscriptionEntitlement(
+                productID: subscription.productID,
+                tier: tier,
+                expirationDate: subscription.expirationDate,
+                renewalAction: nil,
+                ownershipType: Transaction.OwnershipType(rawValue: subscription.ownershipRawValue)
+            )
+        }
+
+        lifetimeEntitlements = snapshot.lifetimeEntitlements.compactMap { lifetime in
+            guard let item = Item(rawValue: lifetime.productID),
+                item.productType == .nonConsumable,
+                let tier = cachedTier(for: item, rawValue: lifetime.tierRawValue)
+            else { return nil }
+
+            return LifetimeEntitlement(
+                productID: lifetime.productID,
+                tier: tier,
+                ownershipType: Transaction.OwnershipType(rawValue: lifetime.ownershipRawValue)
+            )
+        }
+
+        purchasedProductIDs = productIDs(for: activeSubscription, lifetimes: lifetimeEntitlements)
+        resolutionState = .cached
+    }
+
+    /// Rejects entries whose product-to-tier mapping changed since the cache was written.
+    private func cachedTier(for item: Item, rawValue: String) -> Group? {
+        guard let tier = Group(rawValue: rawValue),
+            Item.groupedByTier[tier]?.contains(item) == true
+        else { return nil }
+        return tier
+    }
+
+    private func persistSnapshot() {
+        guard let userDefaults else { return }
+        let snapshot = EntitlementSnapshot(
+            activeSubscription: activeSubscription.map {
+                .init(
+                    productID: $0.productID,
+                    tierRawValue: $0.tier.rawValue,
+                    expirationDate: $0.expirationDate,
+                    ownershipRawValue: $0.ownershipType.rawValue
+                )
+            },
+            lifetimeEntitlements: lifetimeEntitlements.map {
+                .init(
+                    productID: $0.productID,
+                    tierRawValue: $0.tier.rawValue,
+                    ownershipRawValue: $0.ownershipType.rawValue
+                )
+            }
+        )
+
+        do {
+            userDefaults.set(try JSONEncoder().encode(snapshot), forKey: cacheKey)
+        }
+        catch {
+            logger.warning("Unable to persist entitlement cache: \(error)")
+        }
+    }
+}
+
 // MARK: - Transaction Observation
 
 extension EntitlementManager {
@@ -218,6 +329,7 @@ extension EntitlementManager {
     private func startObservingTransactions() {
         updatesTask?.cancel()
         updatesTask = Task(priority: .background) { [weak self] in
+            guard !Task.isCancelled else { return }
             // Track processed transaction IDs to prevent acting on re-delivered updates.
             // StoreKit 2's transaction.finish() normally prevents re-delivery, but this
             // provides a safety net for rapid duplicate emissions within a session.
@@ -234,7 +346,10 @@ extension EntitlementManager {
                 // Leave them for ConsumableManager to handle.
                 guard transaction.productType != .consumable else { continue }
 
-                guard handledTransactionIDs.insert(transaction.id.description).inserted else {
+                // A refund can update a transaction ID already handled earlier in this session.
+                guard transaction.revocationDate != nil
+                    || handledTransactionIDs.insert(transaction.id.description).inserted
+                else {
                     continue
                 }
 
@@ -252,6 +367,7 @@ extension EntitlementManager {
     private func startObservingSubscriptionStatuses() {
         subscriptionStatusTask?.cancel()
         subscriptionStatusTask = Task(priority: .background) { [weak self] in
+            guard !Task.isCancelled else { return }
             for await status in Product.SubscriptionInfo.Status.updates {
                 guard let self else { return }
                 await self.handleSubscriptionStatusUpdate(status)
@@ -309,19 +425,21 @@ extension EntitlementManager {
     /// Calls `performRefresh(force:)`, bypassing the cooldown guard, so that all retry attempts
     /// execute regardless of how quickly they are scheduled while still serialising refresh work.
     ///
-    /// - Performs up to 5 attempts spaced 2 seconds apart.
-    /// - Exits early if a valid entitlement is found.
+    /// - Performs up to 5 attempts spaced 2 seconds apart, followed by a final reconciliation.
+    /// - Exits early if a StoreKit-confirmed entitlement is found.
     private func bootstrapEntitlements() async {
         for attempt in 1...bootstrapMaxAttempts {
             guard !Task.isCancelled else { return }
             await performRefresh(force: true)
 
-            if activeSubscription != nil || !lifetimeEntitlements.isEmpty {
+            if resolutionState == .confirmed,
+                activeSubscription != nil || !lifetimeEntitlements.isEmpty
+            {
                 logger.info("Bootstrap succeeded on attempt \(attempt)")
                 return
             }
 
-            logger.info("Bootstrap attempt \(attempt) found no entitlements, retrying…")
+            logger.info("Bootstrap attempt \(attempt) found no confirmed entitlements, retrying…")
             do {
                 try await Task.sleep(nanoseconds: bootstrapRetryDelay)
             }
@@ -330,8 +448,13 @@ extension EntitlementManager {
             }
         }
 
+        // The retry schedule ends at the early-boot boundary. Reconcile once more so a cached
+        // purchase absent from every StoreKit response cannot survive that window indefinitely.
+        guard !Task.isCancelled else { return }
+        await performRefresh(force: true)
+
         logger.warning(
-            "Bootstrap completed with no entitlements after \(self.bootstrapMaxAttempts) attempts"
+            "Bootstrap retry window completed. Resolution: \(String(describing: self.resolutionState))"
         )
     }
 }
@@ -373,6 +496,11 @@ extension EntitlementManager {
     public func recordVerifiedTransaction(_ transaction: Transaction) async {
         guard transaction.productType != .consumable else {
             logger.info("Ignoring consumable transaction \(transaction.productID) for entitlements")
+            return
+        }
+
+        if let revoked = transaction.revocationDate, revoked <= Date.now {
+            clearEntitlement(for: transaction.productID, reason: "revoked")
             return
         }
 
@@ -474,16 +602,7 @@ extension EntitlementManager {
         for await result in Transaction.currentEntitlements {
             guard case .verified(let t) = result else { continue }
             if let revoked = t.revocationDate, revoked <= Date.now {
-                // These direct mutations serve the early-boot early-return path below,
-                // where we return before reaching the bulk state assignments at the end
-                // of this method. In the normal path they are overwritten by those
-                // assignments and are therefore redundant but harmless.
-                logger.info("Revoked entitlement detected for \(t.productID)")
-                purchasedProductIDs.remove(t.productID)
-                lifetimeEntitlements.removeAll { $0.productID == t.productID }
-                if activeSubscription?.productID == t.productID {
-                    activeSubscription = nil
-                }
+                clearEntitlement(for: t.productID, reason: "revoked")
                 continue
             }
             guard await isUsableEntitlement(t) else {
@@ -508,19 +627,30 @@ extension EntitlementManager {
             )
         }
 
+        applyEntitlementRefresh(activeSub: activeSub, lifetimes: lifetimes, purchasedIDs: activeIDs)
+    }
+
+    /// Applies a complete StoreKit scan. Kept synchronous so resolution, persistence and
+    /// notifications are published together, and reconciliation can be tested without StoreKit.
+    func applyEntitlementRefresh(
+        activeSub: SubscriptionEntitlement<Group>?,
+        lifetimes: [LifetimeEntitlement<Group>],
+        purchasedIDs: Set<String>,
+        now: Date = .now
+    ) {
         // Guard against StoreKit returning an empty response during early boot.
         let hasPreviousEntitlements = !purchasedProductIDs.isEmpty
         let noCurrentEntitlements = activeSub == nil && lifetimes.isEmpty
 
         if noCurrentEntitlements && hasPreviousEntitlements {
-            if shouldRetainCurrentEntitlementsDuringEmptyRefresh() {
+            if resolutionState != .cached && shouldRetainCurrentEntitlementsDuringEmptyRefresh() {
                 logger.info(
                     "Refresh ignored (empty StoreKit response while local subscription remains active)"
                 )
                 return
             }
 
-            let bootElapsed = Date.now.timeIntervalSince(appLaunchTime)
+            let bootElapsed = now.timeIntervalSince(appLaunchTime)
             if bootElapsed < earlyBootWindow {
                 logger.info("Refresh ignored (early boot empty response)")
                 return
@@ -533,20 +663,20 @@ extension EntitlementManager {
         let didChange = !entitlementStateMatches(
             activeSub: activeSub,
             lifetimes: lifetimes,
-            purchasedIDs: activeIDs
+            purchasedIDs: purchasedIDs
         )
 
         activeSubscription = activeSub
         lifetimeEntitlements = lifetimes
-        purchasedProductIDs = activeIDs
+        purchasedProductIDs = purchasedIDs
 
         expiryTask?.cancel()
         if let expiry = activeSub?.expirationDate {
             scheduleExpiryRefresh(at: expiry)
         }
 
-        if didChange || !hasPublishedEntitlementSnapshot {
-            publishEntitlementRefresh()
+        if didChange || !hasPublishedEntitlementSnapshot || resolutionState != .confirmed {
+            publishEntitlementRefresh(confirmsSnapshot: true)
             logger.info(
                 "Entitlement refresh complete. Active tier: \(String(localized: self.activeTier?.displayName ?? "none")) | Expiry: \(self.activeSubscription?.expirationDate?.ISO8601Format() ?? "none")"
             )
@@ -679,7 +809,7 @@ extension EntitlementManager {
     }
 
     /// Removes an entitlement immediately when StoreKit explicitly reports a terminal status.
-    private func clearEntitlement(for productID: String, reason: String) {
+    func clearEntitlement(for productID: String, reason: String) {
         let removedPurchasedID = purchasedProductIDs.remove(productID) != nil
         let removedActiveSubscription = activeSubscription?.productID == productID
         let lifetimeCount = lifetimeEntitlements.count
@@ -699,9 +829,13 @@ extension EntitlementManager {
     }
 
     /// Notifies observers that entitlement state changed.
-    private func publishEntitlementRefresh() {
+    private func publishEntitlementRefresh(confirmsSnapshot: Bool = false) {
         hasPublishedEntitlementSnapshot = true
+        if confirmsSnapshot || resolutionState != .cached {
+            resolutionState = .confirmed
+        }
         refreshCount &+= 1
+        persistSnapshot()
         onRefresh?()
         entitlementContinuation?.yield()
 

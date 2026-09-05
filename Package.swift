@@ -24,6 +24,7 @@ let package = Package(
     .target(
       name: "SKManager",
       dependencies: ["SimpleLogger"],
+      resources: [.process("PrivacyInfo.xcprivacy")],
       swiftSettings: [.swiftLanguageMode(.v6)]
     ),
     .testTarget(

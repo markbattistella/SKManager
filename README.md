@@ -227,6 +227,45 @@ struct PaywallView: View {
 
 ## Keeping Entitlements Fresh
 
+### Launch-time cache
+
+`EntitlementManager` saves a small entitlement snapshot in `UserDefaults` after StoreKit updates
+state and restores it synchronously during initialization. Returning customers can read their
+cached `effectiveTier` on the first render while StoreKit reconciles in the background. Existing
+initialization calls enable this automatically; tier types do not need to conform to `Codable`.
+
+Expired subscriptions and entries with unknown products, tiers, or changed product-to-tier
+mappings are discarded. Purchased IDs are rebuilt from the remaining entries. Family Sharing
+ownership is preserved; subscription `renewalAction` remains `nil` until StoreKit supplies it.
+
+The observable `resolutionState` property exposes how the state was resolved:
+
+| State | Meaning |
+| --- | --- |
+| `.unresolved` | No readable, supported cache was loaded and StoreKit has not resolved state |
+| `.cached` | A snapshot was restored, possibly empty, and awaits a full StoreKit refresh |
+| `.confirmed` | StoreKit has resolved state during this launch, including confirmed no purchases |
+
+The cache is a provisional launch hint, not purchase verification. A refund or account change
+while the app was closed is reflected when StoreKit reconciles. Empty responses retain cached
+access only during the existing launch retry window (about 10 seconds); a final refresh then
+clears entries StoreKit could not confirm. Confirmed empty state also overwrites the cache.
+
+By default, cache keys are scoped to the product and tier type names within the app's standard
+defaults. A custom key and defaults suite can provide a stable namespace or separate caches;
+pass `userDefaults: nil` to disable both reading and writing:
+
+```swift
+let entitlements = EntitlementManager<AppProduct, AppTier, AppCapabilities>(
+    config: AppCapabilities(),
+    cacheKey: "app.entitlements"
+)
+```
+
+The package bundles a privacy manifest declaring its use of app-local and App Group user defaults.
+
+### Live updates
+
 `EntitlementManager` automatically handles mid-session changes via `Transaction.updates` and
 `Product.SubscriptionInfo.Status.updates`, and schedules a refresh at subscription expiry. Two
 additional patterns are recommended in the consuming app:
