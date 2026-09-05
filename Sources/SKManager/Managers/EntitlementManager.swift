@@ -71,6 +71,23 @@ public final class EntitlementManager<
   @ObservationIgnored
   private let appLaunchTime = Date.now
 
+  /// Number of bootstrap attempts performed at launch before giving up.
+  @ObservationIgnored
+  private let bootstrapMaxAttempts = 5
+
+  /// Delay between bootstrap attempts, in nanoseconds.
+  @ObservationIgnored
+  private let bootstrapRetryDelay: UInt64 = 2_000_000_000  // 2 seconds
+
+  /// The span of the early-boot window, derived from the bootstrap retry schedule.
+  ///
+  /// Used to distinguish a StoreKit propagation gap during launch from a genuine
+  /// unsubscribe/expiry once bootstrapping has had a full chance to complete.
+  @ObservationIgnored
+  private var earlyBootWindow: TimeInterval {
+    Double(bootstrapMaxAttempts) * (Double(bootstrapRetryDelay) / 1_000_000_000)
+  }
+
   /// The most recent subscription status observed from StoreKit.
   @ObservationIgnored
   private var latestSubscriptionStatusState: Product.SubscriptionInfo.RenewalState?
@@ -202,15 +219,17 @@ extension EntitlementManager {
   /// whenever a purchase or renewal event occurs.
   private func startObservingTransactions() {
     updatesTask?.cancel()
-    updatesTask = Task.detached(priority: .background) { [weak self] in
-      guard let self else { return }
-
+    updatesTask = Task(priority: .background) { [weak self] in
       // Track processed transaction IDs to prevent acting on re-delivered updates.
       // StoreKit 2's transaction.finish() normally prevents re-delivery, but this
       // provides a safety net for rapid duplicate emissions within a session.
       var handledTransactionIDs = Set<String>()
 
       for await update in Transaction.updates {
+        // Re-checked every iteration (rather than unwrapped once before the loop)
+        // so this loop actually ends once the manager is deallocated, instead of
+        // the capture keeping it alive for the lifetime of the stream.
+        guard let self else { return }
         guard case .verified(let transaction) = update else { continue }
 
         // Consumables are ephemeral and must be delivered before finishing.
@@ -234,10 +253,9 @@ extension EntitlementManager {
   /// stream keeps entitlement state current without relying on the user navigating away and back.
   private func startObservingSubscriptionStatuses() {
     subscriptionStatusTask?.cancel()
-    subscriptionStatusTask = Task.detached(priority: .background) { [weak self] in
-      guard let self else { return }
-
+    subscriptionStatusTask = Task(priority: .background) { [weak self] in
       for await status in Product.SubscriptionInfo.Status.updates {
+        guard let self else { return }
         await self.handleSubscriptionStatusUpdate(status)
       }
     }
@@ -295,10 +313,7 @@ extension EntitlementManager {
   /// - Performs up to 5 attempts spaced 2 seconds apart.
   /// - Exits early if a valid entitlement is found.
   private func bootstrapEntitlements() async {
-    let maxAttempts = 5
-    let retryDelay: UInt64 = 2_000_000_000  // 2 seconds
-
-    for attempt in 1...maxAttempts {
+    for attempt in 1...bootstrapMaxAttempts {
       guard !Task.isCancelled else { return }
       await performRefresh(force: true)
 
@@ -309,13 +324,14 @@ extension EntitlementManager {
 
       logger.info("Bootstrap attempt \(attempt) found no entitlements, retrying…")
       do {
-        try await Task.sleep(nanoseconds: retryDelay)
+        try await Task.sleep(nanoseconds: bootstrapRetryDelay)
       } catch {
         return
       }
     }
 
-    logger.warning("Bootstrap completed with no entitlements after \(maxAttempts) attempts")
+    logger.warning(
+      "Bootstrap completed with no entitlements after \(self.bootstrapMaxAttempts) attempts")
   }
 }
 
@@ -501,7 +517,7 @@ extension EntitlementManager {
       }
 
       let bootElapsed = Date.now.timeIntervalSince(appLaunchTime)
-      if bootElapsed < 10 {
+      if bootElapsed < earlyBootWindow {
         logger.info("Refresh ignored (early boot empty response)")
         return
       } else {
@@ -1068,7 +1084,7 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
 
   /// Checks whether the current user has access to the specified feature.
   public func hasAccess(to feature: Capabilities.Feature) -> Bool {
-    let tier = activeTier ?? defaultTier
+    let tier = effectiveTier
     guard let tier,
       let capability = config.capability(for: feature, in: tier)
     else {
@@ -1081,7 +1097,7 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
   ///
   /// For example, the number of months of data visible under a `.limit(Int)` rule.
   public func limit(for feature: Capabilities.Feature) -> Int? {
-    let tier = activeTier ?? defaultTier
+    let tier = effectiveTier
     guard let tier,
       case .limit(let value)? = config.capability(for: feature, in: tier)
     else {
@@ -1094,7 +1110,7 @@ extension EntitlementManager where Capabilities.CapabilityValue == CapabilityRul
   ///
   /// For `.until(Date)` rules, this indicates when access ends.
   public func expiry(for feature: Capabilities.Feature) -> Date? {
-    let tier = activeTier ?? defaultTier
+    let tier = effectiveTier
     guard let tier,
       case .until(let date)? = config.capability(for: feature, in: tier)
     else {

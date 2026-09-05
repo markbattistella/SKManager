@@ -18,7 +18,7 @@ import StoreKit
 /// - Note: This type is observable and runs on the main actor to ensure UI safety.
 @MainActor
 @Observable
-public class StoreManager<
+public final class StoreManager<
   Item: StoreProductRepresentable,
   Group: ProductTierRepresentable,
   E: EntitlementProvider
@@ -274,8 +274,16 @@ extension StoreManager {
   #endif
 
   /// Restores all previously purchased products and subscriptions from the App Store.
+  ///
+  /// If `AppStore.sync()` fails (for example, the user cancels re-authentication or the
+  /// network is unavailable), the failure is recorded in `lastError` so the caller can
+  /// surface it, rather than silently doing nothing.
   public func restorePurchases() async {
-    try? await AppStore.sync()
+    do {
+      try await AppStore.sync()
+    } catch {
+      lastError = error
+    }
     // AppStore.sync() can return before restored transactions appear in
     // Transaction.currentEntitlements. A short pause lets StoreKit propagate them
     // so the force refresh doesn't run against a stale (empty) snapshot.

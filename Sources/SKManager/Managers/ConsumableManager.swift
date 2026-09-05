@@ -204,10 +204,12 @@ extension ConsumableManager {
   /// are left for `EntitlementManager` to handle.
   private func startObservingTransactions() {
     updatesTask?.cancel()
-    updatesTask = Task.detached(priority: .background) { [weak self] in
-      guard let self else { return }
-
+    updatesTask = Task(priority: .background) { [weak self] in
       for await update in Transaction.updates {
+        // Re-checked every iteration so this loop ends once the manager is
+        // deallocated, instead of the capture keeping it alive for the
+        // lifetime of the stream.
+        guard self != nil else { return }
         guard case .verified(let transaction) = update else { continue }
         guard transaction.productType == .consumable else { continue }
 
