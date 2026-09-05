@@ -183,7 +183,8 @@ public final class EntitlementManager<
         self.expiryTask = nil
         self.defaultTier = defaultTier
         self.config = config
-        self.cacheKey = cacheKey
+        self.cacheKey =
+            cacheKey
             ?? "SKManager.entitlements.\(String(describing: Item.self)).\(String(describing: Group.self))"
         self.userDefaults = userDefaults
         self.purchasedProductIDs = []
@@ -347,8 +348,9 @@ extension EntitlementManager {
                 guard transaction.productType != .consumable else { continue }
 
                 // A refund can update a transaction ID already handled earlier in this session.
-                guard transaction.revocationDate != nil
-                    || handledTransactionIDs.insert(transaction.id.description).inserted
+                guard
+                    transaction.revocationDate != nil
+                        || handledTransactionIDs.insert(transaction.id.description).inserted
                 else {
                     continue
                 }

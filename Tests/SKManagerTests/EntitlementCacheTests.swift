@@ -75,9 +75,12 @@ struct EntitlementCacheTests {
         }
     }
 
-    @Test("Malformed or unsupported cache data leaves state unresolved", arguments: [
-        "not JSON", "{}", "{\"version\":2,\"lifetimeEntitlements\":[]}"
-    ])
+    @Test(
+        "Malformed or unsupported cache data leaves state unresolved",
+        arguments: [
+            "not JSON", "{}", "{\"version\":2,\"lifetimeEntitlements\":[]}",
+        ]
+    )
     func invalidCache(json: String) throws {
         try withDefaults { defaults in
             defaults.set(Data(json.utf8), forKey: cacheKey)
@@ -89,14 +92,19 @@ struct EntitlementCacheTests {
         }
     }
 
-    @Test("Invalid product and tier mappings cannot hydrate access", arguments: [
-        ("removed", "premium"), ("monthly", "removed"), ("monthly", "basic"),
-        ("lifetime", "standard"), ("tip", "premium"), ("unmapped", "premium")
-    ])
+    @Test(
+        "Invalid product and tier mappings cannot hydrate access",
+        arguments: [
+            ("removed", "premium"), ("monthly", "removed"), ("monthly", "basic"),
+            ("lifetime", "standard"), ("tip", "premium"), ("unmapped", "premium"),
+        ]
+    )
     func invalidSubscriptionMapping(productID: String, tier: String) throws {
         try withDefaults { defaults in
             let subscription = EntitlementSnapshot.CachedSubscription(
-                productID: productID, tierRawValue: tier, expirationDate: nil,
+                productID: productID,
+                tierRawValue: tier,
+                expirationDate: nil,
                 ownershipRawValue: Transaction.OwnershipType.purchased.rawValue
             )
             try saveSnapshot(subscription: subscription, to: defaults)
@@ -112,10 +120,11 @@ struct EntitlementCacheTests {
         try withDefaults { defaults in
             let invalid = [
                 ("removed", "standard"), ("lifetime", "removed"), ("lifetime", "premium"),
-                ("monthly", "premium"), ("tip", "premium"), ("unmapped", "premium")
+                ("monthly", "premium"), ("tip", "premium"), ("unmapped", "premium"),
             ].map { productID, tier in
                 EntitlementSnapshot.CachedLifetime(
-                    productID: productID, tierRawValue: tier,
+                    productID: productID,
+                    tierRawValue: tier,
                     ownershipRawValue: Transaction.OwnershipType.purchased.rawValue
                 )
             }
@@ -144,7 +153,9 @@ struct EntitlementCacheTests {
 
             for _ in 0..<2 {
                 manager.applyEntitlementRefresh(
-                    activeSub: nil, lifetimes: [lifetime], purchasedIDs: [lifetime.productID]
+                    activeSub: nil,
+                    lifetimes: [lifetime],
+                    purchasedIDs: [lifetime.productID]
                 )
             }
 
@@ -173,7 +184,9 @@ struct EntitlementCacheTests {
             #expect(defaults.data(forKey: cacheKey) == originalData)
 
             manager.applyEntitlementRefresh(
-                activeSub: nil, lifetimes: [], purchasedIDs: [],
+                activeSub: nil,
+                lifetimes: [],
+                purchasedIDs: [],
                 now: Date.now.addingTimeInterval(11)
             )
             #expect(manager.resolutionState == .confirmed)
@@ -195,15 +208,21 @@ struct EntitlementCacheTests {
             let manager = makeManager(defaults: defaults)
             defer { manager.invalidate() }
             let subscription = SubscriptionEntitlement(
-                productID: CacheItem.monthly.rawValue, tier: MockTier.premium,
-                expirationDate: Date.now.addingTimeInterval(3_600), renewalAction: nil,
+                productID: CacheItem.monthly.rawValue,
+                tier: MockTier.premium,
+                expirationDate: Date.now.addingTimeInterval(3_600),
+                renewalAction: nil,
                 ownershipType: Transaction.OwnershipType.purchased
             )
             manager.applyEntitlementRefresh(
-                activeSub: subscription, lifetimes: [], purchasedIDs: [subscription.productID]
+                activeSub: subscription,
+                lifetimes: [],
+                purchasedIDs: [subscription.productID]
             )
             manager.applyEntitlementRefresh(
-                activeSub: nil, lifetimes: [], purchasedIDs: [],
+                activeSub: nil,
+                lifetimes: [],
+                purchasedIDs: [],
                 now: Date.now.addingTimeInterval(11)
             )
 
@@ -222,16 +241,21 @@ struct EntitlementCacheTests {
         try withDefaults { defaults in
             let manager = makeManager(defaults: defaults)
             let lifetime = LifetimeEntitlement(
-                productID: CacheItem.lifetime.rawValue, tier: MockTier.standard,
+                productID: CacheItem.lifetime.rawValue,
+                tier: MockTier.standard,
                 ownershipType: Transaction.OwnershipType.purchased
             )
             manager.applyEntitlementRefresh(
-                activeSub: nil, lifetimes: [lifetime], purchasedIDs: [lifetime.productID]
+                activeSub: nil,
+                lifetimes: [lifetime],
+                purchasedIDs: [lifetime.productID]
             )
             #expect(makeManager(defaults: defaults).effectiveTier == .standard)
 
             manager.applyEntitlementRefresh(
-                activeSub: nil, lifetimes: [], purchasedIDs: [],
+                activeSub: nil,
+                lifetimes: [],
+                purchasedIDs: [],
                 now: Date.now.addingTimeInterval(11)
             )
             #expect(makeManager(defaults: defaults).effectiveTier == .basic)
@@ -269,11 +293,14 @@ struct EntitlementCacheTests {
             let manager = Manager(config: CacheCapabilities(), userDefaults: defaults)
             manager.invalidate()
             let lifetime = LifetimeEntitlement(
-                productID: CacheItem.lifetime.rawValue, tier: MockTier.standard,
+                productID: CacheItem.lifetime.rawValue,
+                tier: MockTier.standard,
                 ownershipType: Transaction.OwnershipType.purchased
             )
             manager.applyEntitlementRefresh(
-                activeSub: nil, lifetimes: [lifetime], purchasedIDs: [lifetime.productID]
+                activeSub: nil,
+                lifetimes: [lifetime],
+                purchasedIDs: [lifetime.productID]
             )
 
             // Private types must not put reflection's process-specific context address in the key.
@@ -284,7 +311,8 @@ struct EntitlementCacheTests {
             #expect(relaunched.effectiveTier == .standard)
 
             let unrelated = EntitlementManager<MockItem, MockTier, CacheCapabilities>(
-                config: CacheCapabilities(), userDefaults: defaults
+                config: CacheCapabilities(),
+                userDefaults: defaults
             )
             unrelated.invalidate()
             #expect(unrelated.resolutionState == .unresolved)
@@ -296,7 +324,8 @@ struct EntitlementCacheTests {
         try withDefaults { defaults in
             try saveSnapshot(
                 subscription: cachedSubscription(expiry: nil),
-                lifetimes: [cachedLifetime()], to: defaults
+                lifetimes: [cachedLifetime()],
+                to: defaults
             )
             let manager = makeManager(defaults: defaults)
             manager.clearEntitlement(for: CacheItem.monthly.rawValue, reason: "expired")
@@ -308,7 +337,8 @@ struct EntitlementCacheTests {
 
             // An unchanged full scan must still confirm state after a partial live update.
             manager.applyEntitlementRefresh(
-                activeSub: nil, lifetimes: manager.lifetimeEntitlements,
+                activeSub: nil,
+                lifetimes: manager.lifetimeEntitlements,
                 purchasedIDs: manager.purchasedProductIDs
             )
             #expect(manager.resolutionState == .confirmed)
@@ -331,8 +361,10 @@ struct EntitlementCacheTests {
 
     private func makeManager(defaults: UserDefaults) -> Manager {
         let manager = Manager(
-            config: CacheCapabilities(), defaultTier: .basic,
-            cacheKey: cacheKey, userDefaults: defaults
+            config: CacheCapabilities(),
+            defaultTier: .basic,
+            cacheKey: cacheKey,
+            userDefaults: defaults
         )
         // These synchronous tests exercise cache and reconciliation without starting StoreKit.
         manager.invalidate()
@@ -350,14 +382,17 @@ struct EntitlementCacheTests {
 
     private func cachedSubscription(expiry: Date?) -> EntitlementSnapshot.CachedSubscription {
         .init(
-            productID: CacheItem.monthly.rawValue, tierRawValue: MockTier.premium.rawValue,
-            expirationDate: expiry, ownershipRawValue: Transaction.OwnershipType.familyShared.rawValue
+            productID: CacheItem.monthly.rawValue,
+            tierRawValue: MockTier.premium.rawValue,
+            expirationDate: expiry,
+            ownershipRawValue: Transaction.OwnershipType.familyShared.rawValue
         )
     }
 
     private func cachedLifetime() -> EntitlementSnapshot.CachedLifetime {
         .init(
-            productID: CacheItem.lifetime.rawValue, tierRawValue: MockTier.standard.rawValue,
+            productID: CacheItem.lifetime.rawValue,
+            tierRawValue: MockTier.standard.rawValue,
             ownershipRawValue: Transaction.OwnershipType.familyShared.rawValue
         )
     }

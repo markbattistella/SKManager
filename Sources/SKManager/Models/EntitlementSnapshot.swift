@@ -11,7 +11,6 @@ import Foundation
 /// Raw strings keep the cache independent of the app's tier type and StoreKit's non-Codable
 /// ownership type. Purchased IDs are rebuilt from valid entries when restoring the snapshot.
 struct EntitlementSnapshot: Codable, Sendable {
-
     var version = 1
     let activeSubscription: CachedSubscription?
     let lifetimeEntitlements: [CachedLifetime]
